@@ -1,8 +1,9 @@
 # utils/config.py
+import streamlit as st
 from openai import OpenAI
 
-# API配置
-API_KEY = "sk-ws-H.ERMYIEX.3N5K.MEQCIAWqpGL7P-sxRnft9j8urWd0yUOUyn2fQOvBb7rI7qHoAiADuasA9jgsUXdmey8wdprRAWh0KFjcp1RKofMBw_TwMA"
+# 从 Streamlit Secrets 读取 API 配置
+API_KEY = st.secrets["ALIYUN_API_KEY"]
 BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 MODEL = "qwen-plus"
 
