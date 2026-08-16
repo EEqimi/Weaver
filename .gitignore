@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Streamlit 密钥（切勿提交，匹配任意层级目录）
+**/.streamlit/secrets.toml
+
+# 作者编辑工具工作区（用户数据，勿提交）
+workspace/
