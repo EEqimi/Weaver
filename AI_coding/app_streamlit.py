@@ -7,6 +7,26 @@ import streamlit as st
 from agents.inspiration_catcher import InspirationCatcher
 from agents.theme_deepener import ThemeDeepener
 from utils.adapter import adapt_to_story_direction
+from utils.knowledge_base import KnowledgeBase
+from utils.text_editor import TextEditor
+
+
+def render_editor(node_name, generated_key):
+    """受侧边栏「作者编辑工具」控制，按需渲染编辑工具"""
+    mode = st.session_state.get("editor_tool", "关闭")
+    if mode == "关闭":
+        return
+    editor = TextEditor(node_name)
+    kb = KnowledgeBase(editor)
+    generated = st.session_state.get(generated_key, "")
+    if mode == "文本编辑":
+        col_kb, col_ed = st.columns([1, 1.5])  # 并联：知识库 + 编辑框
+        with col_kb:
+            kb.render(compact=True)
+        with col_ed:
+            editor.render(generated_text=generated)
+    elif mode == "版本历史":
+        editor.render_history()
 
 
 # ============================================================
@@ -377,6 +397,13 @@ with st.sidebar:
     
     st.divider()
     
+    st.selectbox(
+        "✏️ 作者编辑工具",
+        ["关闭", "文本编辑", "版本历史"],
+        key="editor_tool",
+        help="编辑工具：文本编辑（并联知识库）、历史版本回溯",
+    )
+
     if st.button("🗑️ 清空所有数据", use_container_width=True):
         st.session_state.catcher.clear_history()
         st.session_state.deepener.clear_history()
@@ -472,6 +499,7 @@ if node_option == "灵感捕捉器":
             with st.spinner("🧠 AI 正在构思故事方向..."):
                 raw_result = st.session_state.catcher.run(enhanced_prompt)
                 formatted_result = st.session_state.catcher.format_output(raw_result)
+                st.session_state["generated_inspiration"] = formatted_result
 
                 try:
                     clean = raw_result.strip()
@@ -501,6 +529,8 @@ if node_option == "灵感捕捉器":
 
             试试看吧！✨
             """)
+
+    render_editor("灵感捕捉器", "generated_inspiration")
 
 
 # ============================================================
@@ -572,11 +602,14 @@ elif node_option == "主题深化师":
                     story_json = json.dumps(story_data, ensure_ascii=False)
                     raw_result = st.session_state.deepener.run(story_json)
                     formatted_result = st.session_state.deepener.format_output(raw_result)
+                    st.session_state["generated_theme"] = formatted_result
 
                     st.divider()
                     st.markdown("### ✨ 主题深化结果")
                     st.markdown(formatted_result)
                     st.session_state.theme_result = raw_result
+
+    render_editor("主题深化师", "generated_theme")
 
 
 # ============================================================
@@ -651,10 +684,13 @@ elif node_option == "人物工坊":
                     input_json = json.dumps(input_data, ensure_ascii=False)
                     raw_result = st.session_state.character_workshop.run(input_json)
                     formatted_result = st.session_state.character_workshop.format_output(raw_result)
+                    st.session_state["generated_character"] = formatted_result
                     st.divider()
                     st.markdown("### ✨ 角色生成结果")
                     st.markdown(formatted_result)
                     st.session_state.character_result = raw_result
+
+    render_editor("人物工坊", "generated_character")
 
 
 # ============================================================
@@ -765,10 +801,13 @@ elif node_option == "情节建筑师":
                 input_json = json.dumps(input_data, ensure_ascii=False)
                 raw_result = st.session_state.plot_architect.run(input_json)
                 formatted_result = st.session_state.plot_architect.format_output(raw_result)
+                st.session_state["generated_plot"] = formatted_result
                 st.divider()
                 st.markdown("### ✨ 情节大纲生成结果")
                 st.markdown(formatted_result)
                 st.session_state.plot_result = raw_result
+
+    render_editor("情节建筑师", "generated_plot")
 
 
 # ============================================================
@@ -894,6 +933,7 @@ elif node_option == "章节作家":
                 input_json = json.dumps(context_data, ensure_ascii=False)
                 raw_result = st.session_state.chapter_writer.run(input_json)
                 formatted_result = st.session_state.chapter_writer.format_output(raw_result)
+                st.session_state["generated_chapter"] = formatted_result
                 st.divider()
                 st.markdown("### ✨ 生成的章节")
                 st.markdown(formatted_result)
@@ -907,6 +947,8 @@ elif node_option == "章节作家":
                     st.session_state.chapters.append(chapter_data)
                 except:
                     st.info("章节已生成，但解析保存失败。")
+
+    render_editor("章节作家", "generated_chapter")
 
 
 # ============================================================
@@ -1022,6 +1064,7 @@ elif node_option == "风格调色盘":
                     input_json = json.dumps(input_data, ensure_ascii=False)
                     raw_result = st.session_state.style_palette.run(input_json)
                     formatted_result = st.session_state.style_palette.format_output(raw_result)
+                    st.session_state["generated_style"] = formatted_result
                     
                     st.divider()
                     st.markdown("### ✨ 润色结果")
@@ -1060,6 +1103,8 @@ elif node_option == "风格调色盘":
                     except Exception as e:
                         st.markdown(formatted_result)
                         st.info("润色完成，但段落对比展示解析失败。")
+
+    render_editor("风格调色盘", "generated_style")
 
 
 # ============================================================
@@ -1144,6 +1189,7 @@ elif node_option == "评价迭代器":
                 input_json = json.dumps(eval_context, ensure_ascii=False)
                 raw_result = st.session_state.evaluation_iterator.run(input_json)
                 formatted_result = st.session_state.evaluation_iterator.format_output(raw_result)
+                st.session_state["generated_evaluation"] = formatted_result
                 st.divider()
                 st.markdown("### ✨ 评价结果")
                 st.markdown(formatted_result)
@@ -1185,6 +1231,8 @@ elif node_option == "评价迭代器":
                     file_name="创作手记.md",
                     mime="text/markdown"
                 )
+
+    render_editor("评价迭代器", "generated_evaluation")
 
 
 # ============================================================
