@@ -1,5 +1,7 @@
 # app_streamlit.py
+import base64
 import json
+import os
 from datetime import datetime
 
 import streamlit as st
@@ -9,6 +11,16 @@ from agents.theme_deepener import ThemeDeepener
 from utils.adapter import adapt_to_story_direction
 from utils.knowledge_base import KnowledgeBase
 from utils.text_editor import TextEditor
+
+
+def get_background_image_uri():
+    """读取 assets/background.jpg，返回可嵌入 CSS 的 data URI（无图片时返回 None）"""
+    img_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "background.jpg")
+    if not os.path.exists(img_path):
+        return None
+    with open(img_path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
 
 
 def render_editor(node_name, generated_key):
@@ -119,34 +131,47 @@ st.markdown("""
 <style>
     /* 全局字体微调 */
     .stApp {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        background: #faf6ef;
+        color: #2f2a24;
+        font-family: 'Noto Sans SC', 'PingFang SC', -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', sans-serif;
+    }
+
+    /* 侧边栏：暖白 */
+    [data-testid="stSidebar"] {
+        background: #f4eee2;
+        border-right: 1px solid #e8e0d2;
+    }
+    [data-testid="stSidebar"] * {
+        color: #5a5246;
     }
     
     /* 主标题区样式 */
     .main-header {
         margin-bottom: 0.5rem;
         padding: 0.5rem 0 0.5rem 0;
-        border-bottom: 2px solid #f0f2f6;
+        border-bottom: 2px solid #e8e0d2;
     }
     .main-header h1 {
+        font-family: 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', serif;
         font-weight: 700 !important;
-        font-size: 2.2rem !important;
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        font-size: 2.3rem !important;
+        letter-spacing: 0.06em;
+        background: linear-gradient(135deg, #3a3226 0%, #b58a3d 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         display: inline-block;
     }
     .main-header .subtitle {
-        color: #6c757d;
+        color: #8a7d6a;
         font-size: 1.05rem;
         margin-top: -0.2rem;
     }
     .main-header .badge {
-        background: #e9ecef;
+        background: #e8e0d2;
         padding: 0.2rem 0.8rem;
         border-radius: 20px;
         font-size: 0.75rem;
-        color: #495057;
+        color: #b58a3d;
         display: inline-block;
         margin-left: 0.5rem;
     }
@@ -157,22 +182,26 @@ st.markdown("""
         margin-bottom: 1rem;
     }
     .node-header h2 {
+        font-family: 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', serif;
         font-weight: 600 !important;
         font-size: 1.6rem !important;
-        margin-bottom: 0.1rem !important;
+        margin-bottom: 0.15rem !important;
+        color: #2f2a24;
+        border-left: 4px solid #b58a3d;
+        padding-left: 0.7rem;
     }
     .node-header .node-caption {
-        color: #6c757d;
+        color: #8a7d6a;
         font-size: 0.95rem;
     }
     
     /* 卡片式输入区域 */
     .input-card {
-        background-color: #f8f9fa;
+        background-color: #fffdf8;
         padding: 1.8rem 2rem 1.2rem 2rem;
         border-radius: 1rem;
         margin-bottom: 1.8rem;
-        border: 1px solid #e9ecef;
+        border: 1px solid #e8e0d2;
         transition: box-shadow 0.2s ease;
     }
     .input-card:hover {
@@ -182,11 +211,11 @@ st.markdown("""
         font-weight: 600;
         font-size: 1.1rem;
         margin-bottom: 0.2rem;
-        color: #212529;
+        color: #2f2a24;
     }
     .input-card .card-hint {
         font-size: 0.9rem;
-        color: #868e96;
+        color: #8a7d6a;
         margin-bottom: 1rem;
     }
     
@@ -207,11 +236,11 @@ st.markdown("""
     
     /* 主按钮（primary）特殊样式 */
     .stButton button[kind="primary"] {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%) !important;
+        background: linear-gradient(135deg, #3a3226 0%, #b58a3d 100%) !important;
         color: white !important;
     }
     .stButton button[kind="primary"]:hover {
-        background: linear-gradient(135deg, #2d2d4a 0%, #1a2744 100%) !important;
+        background: linear-gradient(135deg, #a67c52 0%, #9a6f2e 100%) !important;
     }
     
     /* 侧边栏优化 */
@@ -221,7 +250,7 @@ st.markdown("""
     .sidebar-section {
         margin-top: 1rem;
         padding-top: 1rem;
-        border-top: 1px solid #e9ecef;
+        border-top: 1px solid #e8e0d2;
     }
     .sidebar-section:first-of-type {
         border-top: none;
@@ -259,14 +288,53 @@ st.markdown("""
     /* 页脚 */
     .footer {
         text-align: center;
-        color: #adb5bd;
+        color: #b8ad9c;
         font-size: 0.8rem;
         padding: 1.5rem 0 0.5rem 0;
-        border-top: 1px solid #f0f2f6;
+        border-top: 1px solid #e8e0d2;
         margin-top: 2rem;
     }
 </style>
 """, unsafe_allow_html=True)
+
+# ---- 自定义背景图片 ----
+# 背景图铺满整屏；主内容与侧边栏用半透明磨砂卡片，让图片环绕在文字四周。
+# 注意：不要用 background-attachment: fixed 或 backdrop-filter，在部分浏览器会渲染成黑块。
+_bg_uri = get_background_image_uri()
+if _bg_uri:
+    st.markdown(
+        f"""
+        <style>
+            /* 整屏背景图：铺满、居中、随内容滚动 */
+            .stApp {{
+                background-image: url("{_bg_uri}");
+                background-size: cover;
+                background-position: center;
+                background-repeat: no-repeat;
+            }}
+
+            /* 顶部留白条透明，露出背景图 */
+            [data-testid="stHeader"] {{
+                background: transparent;
+            }}
+
+            /* 主内容区：半透明暖白磨砂卡片，文字清晰、图片从四周透出 */
+            [data-testid="stMainBlockContainer"] {{
+                background: rgba(255, 253, 248, 0.78);
+                border-radius: 1rem;
+                padding: 2rem 2.2rem;
+                margin-top: 1rem;
+                margin-bottom: 1rem;
+            }}
+
+            /* 侧边栏：半透明暖白，露出背景图 */
+            [data-testid="stSidebar"] {{
+                background: rgba(244, 238, 226, 0.82);
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
@@ -307,12 +375,12 @@ if not st.session_state.enter_workspace:
         <div style="text-align: center; padding: 0.5rem 0 0.2rem 0;">
             <div style="font-size: 3.2rem; line-height: 1.2;">🧠</div>
             <h1 style="font-size: 2.6rem; font-weight: 700; margin: 0.1rem 0 0 0; 
-                       background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                       background: linear-gradient(135deg, #3a3226 0%, #b58a3d 100%);
                        -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
                 文思工坊
             </h1>
-            <p style="font-size: 0.95rem; color: #6c757d; margin: 0.1rem 0 0.8rem 0;">
-                人机协作叙事生成系统 <span style="background: #e9ecef; padding: 0.05rem 0.5rem; border-radius: 12px; font-size: 0.6rem; color: #495057; -webkit-text-fill-color: #495057;">v2.0</span>
+            <p style="font-size: 0.95rem; color: #8a7d6a; margin: 0.1rem 0 0.8rem 0;">
+                人机协作叙事生成系统 <span style="background: #e8e0d2; padding: 0.05rem 0.5rem; border-radius: 12px; font-size: 0.6rem; color: #b58a3d; -webkit-text-fill-color: #b58a3d;">v2.0</span>
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -320,38 +388,38 @@ if not st.session_state.enter_workspace:
         # 七个节点概览卡片（带小标题）
         st.markdown("""
         <div style="margin: 0.2rem 0 1rem 0;">
-            <p style="text-align: center; font-size: 0.75rem; font-weight: 500; color: #868e96; letter-spacing: 2px; margin-bottom: 0.6rem;">
+            <p style="text-align: center; font-size: 0.75rem; font-weight: 500; color: #8a7d6a; letter-spacing: 2px; margin-bottom: 0.6rem;">
                 — 七个创作节点 —
             </p>
             <div style="display: flex; justify-content: center;">
                 <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; max-width: 600px; width: 100%;">
-                    <div style="background: #f8f9fa; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e9ecef;">
+                    <div style="background: #fffdf8; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e8e0d2;">
                         <div style="font-size: 1.2rem;">💡</div>
-                        <div style="font-size: 0.6rem; font-weight: 600; color: #212529; line-height: 1.2;">灵感捕捉器</div>
+                        <div style="font-size: 0.6rem; font-weight: 600; color: #2f2a24; line-height: 1.2;">灵感捕捉器</div>
                     </div>
-                    <div style="background: #f8f9fa; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e9ecef;">
+                    <div style="background: #fffdf8; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e8e0d2;">
                         <div style="font-size: 1.2rem;">🎯</div>
-                        <div style="font-size: 0.6rem; font-weight: 600; color: #212529; line-height: 1.2;">主题深化师</div>
+                        <div style="font-size: 0.6rem; font-weight: 600; color: #2f2a24; line-height: 1.2;">主题深化师</div>
                     </div>
-                    <div style="background: #f8f9fa; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e9ecef;">
+                    <div style="background: #fffdf8; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e8e0d2;">
                         <div style="font-size: 1.2rem;">👥</div>
-                        <div style="font-size: 0.6rem; font-weight: 600; color: #212529; line-height: 1.2;">人物工坊</div>
+                        <div style="font-size: 0.6rem; font-weight: 600; color: #2f2a24; line-height: 1.2;">人物工坊</div>
                     </div>
-                    <div style="background: #f8f9fa; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e9ecef;">
+                    <div style="background: #fffdf8; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e8e0d2;">
                         <div style="font-size: 1.2rem;">📐</div>
-                        <div style="font-size: 0.6rem; font-weight: 600; color: #212529; line-height: 1.2;">情节建筑师</div>
+                        <div style="font-size: 0.6rem; font-weight: 600; color: #2f2a24; line-height: 1.2;">情节建筑师</div>
                     </div>
-                    <div style="background: #f8f9fa; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e9ecef;">
+                    <div style="background: #fffdf8; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e8e0d2;">
                         <div style="font-size: 1.2rem;">✍️</div>
-                        <div style="font-size: 0.6rem; font-weight: 600; color: #212529; line-height: 1.2;">章节作家</div>
+                        <div style="font-size: 0.6rem; font-weight: 600; color: #2f2a24; line-height: 1.2;">章节作家</div>
                     </div>
-                    <div style="background: #f8f9fa; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e9ecef;">
+                    <div style="background: #fffdf8; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e8e0d2;">
                         <div style="font-size: 1.2rem;">🎨</div>
-                        <div style="font-size: 0.6rem; font-weight: 600; color: #212529; line-height: 1.2;">风格调色盘</div>
+                        <div style="font-size: 0.6rem; font-weight: 600; color: #2f2a24; line-height: 1.2;">风格调色盘</div>
                     </div>
-                    <div style="background: #f8f9fa; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e9ecef;">
+                    <div style="background: #fffdf8; padding: 0.5rem 0.2rem; border-radius: 0.6rem; text-align: center; border: 1px solid #e8e0d2;">
                         <div style="font-size: 1.2rem;">📊</div>
-                        <div style="font-size: 0.6rem; font-weight: 600; color: #212529; line-height: 1.2;">评价迭代器</div>
+                        <div style="font-size: 0.6rem; font-weight: 600; color: #2f2a24; line-height: 1.2;">评价迭代器</div>
                     </div>
                 </div>
             </div>
@@ -365,7 +433,7 @@ if not st.session_state.enter_workspace:
         
         # 底部版权信息
         st.markdown("""
-        <div style="text-align: center; color: #adb5bd; font-size: 0.7rem; margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid #f0f2f6;">
+        <div style="text-align: center; color: #b8ad9c; font-size: 0.7rem; margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid #e8e0d2;">
             七步创作闭环 · 让每个有故事的人成为真正的写作者
         </div>
         """, unsafe_allow_html=True)
