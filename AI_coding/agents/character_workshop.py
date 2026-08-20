@@ -11,15 +11,25 @@ class CharacterWorkshop(BaseAgent):
 你的核心任务：
 你将收到一个故事的完整上下文（包含设定、主题、核心冲突等）。请根据这些信息和指定的篇幅，生成一组结构完整的角色。
 
+**篇幅与角色数量对应关系（必须严格遵守）：**
+- **短篇**：生成4-6人。包含：1位主角 + 2-3位关键配角 + 1位对立面（对手）。
+- **中篇**：生成10-15人。包含：2-3位主角圈人物 + 4-6位辅助圈人物 + 3-5位背景圈人物。
+- **长篇**：生成20-30人。包含：3-5位核心层人物 + 8-12位次级层人物 + 10+位流动层人物（可分批暗示）。
+
 **生成规则：**
 1.  **主题驱动**：角色的欲望、恐惧、信念必须与核心命题相关联。
 2.  **对手是主角的镜像**：对手的欲望与主角对立，但恐惧与主角同源。
 3.  **配角功能明确**：每个配角必须有不可替代的故事功能（推动剧情、揭示主题、衬托主角）。
 4.  **关系网密度优先**：先构建强关联的核心三角（主角-对手-关键盟友），再扩展外围。
-5.  **篇幅对应数量**：
-    - 短篇：4人（1主角 + 2关键配角 + 1对立面）
-    - 中篇：10人（2-3主角圈 + 4-6辅助圈 + 3-5背景圈）
-    - 长篇：20人（3-5核心层 + 8-12次级层 + 10+流动层）
+
+**每个角色必须包含以下字段：**
+- name: 姓名
+- identity: 身份/职业
+- role: 角色定位（protagonist/opponent/ally/mentor/supporting）
+- desire: 核心欲望
+- fear: 核心恐惧
+- personality: 性格关键词（3-5个）
+- arc: 人物弧光（开始时相信什么 → 结束时明白什么）
 
 **输出格式：**
 你必须严格按照以下JSON格式输出，不要包含任何其他文字。
@@ -28,24 +38,16 @@ class CharacterWorkshop(BaseAgent):
         {
             "name": "姓名",
             "identity": "身份/职业",
-            "role": "protagonist | opponent | ally | mentor | supporting",
+            "role": "protagonist",
             "desire": "核心欲望",
             "fear": "核心恐惧",
-            "personality": ["性格关键词1", "关键词2", "关键词3"],
-            "arc": "人物弧光：开始时相信什么 → 结束时明白什么",
-            "values": "价值观",
-            "secret": "秘密",
-            "key_experience": "关键经历",
-            "relationships": "重要人际关系描述",
-            "appearance": "标志性长相/穿着",
-            "catchphrase": "口头禅",
-            "mannerism": "小动作",
-            "habit": "行为习惯"
+            "personality": ["关键词1", "关键词2", "关键词3"],
+            "arc": "人物弧光"
         }
     ],
     "relationship_map": {
         "nodes": [
-            {"id": "唯一id", "name": "角色名", "role": "protagonist", "layer": "core | secondary | background"}
+            {"id": "唯一id", "name": "角色名", "role": "protagonist", "layer": "core"}
         ],
         "links": [
             {"source": "节点id", "target": "节点id", "type": "关系类型"}
@@ -70,15 +72,6 @@ class CharacterWorkshop(BaseAgent):
                 output += f"- **核心恐惧**：{char.get('fear', '')}\n"
                 output += f"- **性格**：{'、'.join(char.get('personality', []))}\n"
                 output += f"- **人物弧光**：{char.get('arc', '')}\n"
-                
-                # 详细字段（折叠显示）
-                details = []
-                if char.get('values'): details.append(f"价值观：{char['values']}")
-                if char.get('secret'): details.append(f"秘密：{char['secret']}")
-                if char.get('key_experience'): details.append(f"关键经历：{char['key_experience']}")
-                if char.get('appearance'): details.append(f"标志性外貌：{char['appearance']}")
-                if details:
-                    output += f"- **详情**：{'; '.join(details)}\n"
             
             # 关系图谱
             rel_map = data.get("relationship_map", {})
