@@ -247,11 +247,11 @@ a deterministic orchestrator that runs everything *except* LLM calibration.
 
 ---
 
-## Current Checkpoint — Phase 3–4 (verified deterministic state)
+## Checkpoint — Phase 3–4 (verified deterministic state)
 
-**Status:** COMPLETE — REVIEW PENDING. **STOPPED before the first sampled LLM
-calibration** (spec §13/§14). Do not launch the 40-chunk LLM calibration or
-begin Phase 5 until reviewed.
+**Status:** SUPERSEDED (CV metrics replaced by the Phase 3–4.1 leak-free run
+below). **STOPPED before the first sampled LLM calibration** (spec §13/§14). Do
+not launch the 40-chunk LLM calibration or begin Phase 5 until reviewed.
 
 Verified results (reproducible via `run_deterministic_pipeline()`):
 
@@ -273,6 +273,74 @@ Verified results (reproducible via `run_deterministic_pipeline()`):
 - **Generated artifacts (gitignored, under `data/analysis/`):**
   `chunk_profiles.jsonl`, `work_profiles.json`, `author_profiles.json`,
   `stylometry/{matrix.npz,index.json,baseline.json}`, `calibration_sample.json`.
+
+---
+
+## Current Checkpoint — Phase 3–4.1 Calibration Readiness Fix
+
+**Status:** COMPLETE — REVIEW PENDING. **STOPPED before the first sampled LLM
+calibration.** Do not launch the 40-chunk LLM calibration or begin Phase 5 until
+reviewed. Do not merge or open a PR.
+
+Code-review-driven fixes making the deterministic pipeline calibration-ready for
+the sampled LLM run. Ten items addressed:
+
+1. **LLM feature measurement scales** — `knowledge/schema/rubrics.py`:
+   `MeasurementRubric` / `RubricRegistry` / `build_default_rubrics()`; two
+   protocol families: `frequency` (LLM identifies instances, program counts
+   *verified* instances) vs `ordinal` (anchored 0=absent … 4=dominant). Every
+   LLM-derived feature declares `measurement_protocol` + `protocol_version`.
+2. **Grouped-CV feature-selection leakage** — `grouped_cross_validation_texts()`
+   refits `StylometricVectorizer` per fold (train works only); left-out work is
+   transformed with that fold's vectorizer. Held-out Persuasion/TOTC stay
+   train-fit-only.
+3. **Calibration ordering** — sampling sorts by `seq` (globally monotonic), not
+   the lexicographic chapter string (`"10" < "2"` bug).
+4. **Aggregation preserves uncertainty/evidence** — work/author profiles keep
+   `n_total` / `n_valid` / `n_missing`, an independent confidence summary (never
+   averaged into value), evidence refs, analyzer ids/versions, schema versions,
+   and chunk provenance.
+5. **Evidence verification** — `knowledge/analysis/evidence.py` (NFC +
+   punctuation normalization + whitespace collapse + substring match); applied
+   to `LlmFeatureAnalyzer`, `NarrativeAnalyzer`, `StrategyMiner`; unverified
+   quotes flagged, not silently dropped; high-confidence positives require
+   verified evidence.
+6. **Narrative validation** — proportions validated (numeric/range/keys/≈sum);
+   explicit `unknown` / `insufficient_evidence` / `not_observable`; dataclass
+   defaults no longer fabricate observations.
+7. **Strategy evidence** — non-empty consistent author required before
+   VALIDATED; match confidence + all valid quotes preserved; analyzer/schema
+   provenance added.
+8. **Stylometric family overlap** — word-unigram now excludes function words
+   (`stop_words`), removing double-weighting; `family_overlap()` audit added.
+9. **Regression tests** for every issue.
+10. **Docs/Git** — this entry + STATUS update + regenerated manifest/baseline.
+
+### Experimental results (deterministic, leak-free — no LLM run)
+- Layer A: 2,328 TRAIN chunks × 22 deterministic features (unchanged).
+- Layer D: `StylometricVectorizer` — 154 function words + char-3gram (400) +
+  word-unigram (400, **function words excluded**); family-overlap audit:
+  `n_word_unigram=400`, `n_function_word_overlap=0`, `overlap=[]`.
+- Grouped leave-one-work-out CV (SVM, class-weighted):
+  - **Old (leaky matrix CV, function-word overlap):** `[0.852, 0.922, 0.845, 0.916]`,
+    mean ≈ 0.884.
+  - **New (leak-free, per-fold vectorizer refit):** `[0.819, 0.924, 0.794, 0.905]`,
+    mean ≈ 0.861.
+  - Δ ≈ −0.023. The leak-free estimate is the honest bound; the difference
+    reflects (a) per-fold refit (no train-vocab leakage) and (b) function-word
+    de-duplication in the word-unigram family.
+- Held-out accuracy (train→TRAIN, test→Persuasion + TOTC): **0.745**
+  (was 0.756).
+- Calibration sample: 40 chunks (4 × 10), `seq`-ordered deterministic stratified
+  sampling; held-out excluded.
+
+### Tests
+- **97 tests passed** (was 85). New regression tests cover: measurement-protocol
+  classification, frequency-vs-ordinal LLM contracts, evidence verification,
+  calibration `seq` ordering, aggregation uncertainty/evidence preservation,
+  word-unigram function-word exclusion, leak-free grouped CV.
+
+### No real LLM calls launched.
 
 ---
 

@@ -17,7 +17,13 @@ PASSAGE = "He walked alone down the lane, and did not once look back."
 
 
 def _judgment_feature():
+    # frequency 协议特征：LLM 识别实例，程序对已验证实例计数
     return build_default_registry().get("irony_frequency")
+
+
+def _ordinal_feature():
+    # ordinal 协议特征：锚定序数 0–4，程序校验档位
+    return build_default_registry().get("irony_intensity")
 
 
 # ---- 无 provider：显式不可用，绝不伪造 ----
@@ -36,34 +42,65 @@ def test_narrative_analyzer_unavailable_without_provider():
 
 
 # ---- LLM schema 校验 ----
-def test_llm_feature_analyzer_valid_response():
-    resp = json.dumps({"value": 0.7, "confidence": 0.9,
-                       "evidence": ["did not once look back"],
-                       "reasoning_summary": "克制表达"})
+def test_llm_feature_analyzer_valid_frequency_response():
+    # frequency 协议：LLM 返回 instances 列表，程序对已验证实例计数（task item 1/5）
+    resp = json.dumps({"instances": [{"evidence": "did not once look back",
+                                      "label": "negation"}],
+                       "confidence": 0.9, "reasoning_summary": "克制表达"})
     a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
     fv = a.analyze(PASSAGE, _judgment_feature(), chunk_id="c1")
     assert fv.feature_id == "irony_frequency"
-    assert fv.value == 0.7
+    assert fv.value == 1.0                      # 1 条已验证实例
     assert fv.evidence == ["did not once look back"]
     assert fv.provenance["chunk_id"] == "c1"
+    assert fv.provenance["n_instances_verified"] == 1
 
 
-def test_llm_feature_analyzer_missing_value():
+def test_llm_feature_analyzer_valid_ordinal_response():
+    # ordinal 协议：LLM 返回锚定档位 level + 证据，程序校验档位（task item 1）
+    resp = json.dumps({"level": 2, "confidence": 0.7,
+                       "evidence": ["did not once look back"],
+                       "reasoning_summary": "中等强度"})
+    a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
+    fv = a.analyze(PASSAGE, _ordinal_feature(), chunk_id="c1")
+    assert fv.feature_id == "irony_intensity"
+    assert fv.value == 2.0
+    assert fv.provenance["level_label"] == "moderate"
+
+
+def test_llm_feature_analyzer_ordinal_level_out_of_range():
+    resp = json.dumps({"level": 9, "confidence": 0.5, "evidence": []})
+    a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
+    with pytest.raises(LLMResponseError):
+        a.analyze(PASSAGE, _ordinal_feature())
+
+
+def test_llm_feature_analyzer_rejects_unverified_confident_positive():
+    # 高置信正向判定但证据无法逐字对应 passage → 报错，绝不静默接受编造引文
+    resp = json.dumps({"instances": [{"evidence": "completely fabricated quote",
+                                      "label": "x"}],
+                       "confidence": 0.9, "reasoning_summary": "..."})
+    a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
+    with pytest.raises(LLMResponseError):
+        a.analyze(PASSAGE, _judgment_feature())
+
+
+def test_llm_feature_analyzer_missing_instances():
     resp = json.dumps({"confidence": 0.9, "evidence": []})
     a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
     with pytest.raises(LLMResponseError):
         a.analyze(PASSAGE, _judgment_feature())
 
 
-def test_llm_feature_analyzer_non_numeric_continuous():
-    resp = json.dumps({"value": "high", "confidence": 0.9, "evidence": []})
+def test_llm_feature_analyzer_non_numeric_ordinal_level():
+    resp = json.dumps({"level": "high", "confidence": 0.9, "evidence": []})
     a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
     with pytest.raises(LLMResponseError):
-        a.analyze(PASSAGE, _judgment_feature())
+        a.analyze(PASSAGE, _ordinal_feature())
 
 
 def test_llm_feature_analyzer_confidence_out_of_range():
-    resp = json.dumps({"value": 0.5, "confidence": 1.7, "evidence": []})
+    resp = json.dumps({"instances": [], "confidence": 1.7})
     a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
     with pytest.raises(LLMResponseError):
         a.analyze(PASSAGE, _judgment_feature())

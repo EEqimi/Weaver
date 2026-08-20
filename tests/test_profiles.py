@@ -65,6 +65,31 @@ def test_aggregate_feature_values_empty():
     assert aggregate_feature_values([]) == {"n": 0}
 
 
+def test_aggregate_feature_values_preserves_missing_confidence_evidence():
+    # task item 4：聚合必须保留 n_total/n_valid/n_missing、独立 confidence 汇总、
+    # evidence 引用、analyzer/schema 溯源；绝不把 confidence 平均进 value。
+    fvs = [
+        _fv("a", 1.0),
+        FeatureValue(feature_id="a", value=None, raw_value=None,
+                     value_type="continuous", measurement_type="statistical",
+                     confidence=0.8, evidence=["e1"], analyzer_id="X",
+                     analyzer_version="1.0", provenance={"chunk_id": "c2"}),
+        _fv("a", 3.0),
+    ]
+    s = aggregate_feature_values(fvs)
+    assert s["n_total"] == 3
+    assert s["n_valid"] == 2
+    assert s["n_missing"] == 1
+    # value 汇总基于有效值，不受 confidence 污染
+    assert s["mean"] == 2.0
+    # confidence 独立汇总
+    assert s["confidence"]["mean"] == 0.8
+    assert s["evidence_refs"] == [["e1"]]
+    assert s["analyzer_ids"] == ["X"]
+    assert s["analyzer_versions"] == ["1.0"]
+    assert s["provenance"] == [{"chunk_id": "c2"}]
+
+
 # ---- narrative 聚合 ----
 def _obs(pov="third", focalization="internal"):
     return NarrativeObservation(chunk_id="c", pov=pov, focalization=focalization)
@@ -75,6 +100,18 @@ def test_aggregate_narrative_categorical():
     assert s["pov"]["proportions"] == {"third": 1.0}
     assert s["focalization"]["proportions"]["internal"] == pytest.approx(0.5)
     assert s["n"] == 2
+
+
+def test_aggregate_narrative_preserves_evidence_and_confidence():
+    # task item 4：叙事聚合保留逐 chunk 证据引用、未验证引文与 confidence 汇总
+    o1 = NarrativeObservation(chunk_id="c1", observed_evidence=["q1"], confidence=0.9)
+    o2 = NarrativeObservation(chunk_id="c2", unverified_evidence=["u1"], confidence=0.5)
+    s = aggregate_narrative([o1, o2])
+    assert s["observed_evidence"] == {"c1": ["q1"]}
+    assert s["unverified_evidence"] == {"c2": ["u1"]}
+    assert s["confidence"]["mean"] == pytest.approx(0.7)
+    assert s["n_total"] == 2
+    assert s["chunk_provenance"] == ["c1", "c2"]
 
 
 # ---- Work/Author 画像 ----

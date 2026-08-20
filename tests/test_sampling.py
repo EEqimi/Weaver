@@ -78,3 +78,31 @@ def test_manifest_deterministic_and_excludes_heldout_metadata():
     assert "persuasion" in m1["held_out_excluded"]
     assert "tale_of_two_cities" in m1["held_out_excluded"]
     assert m1["works"]["pride_and_prejudice"]["n_selected"] == 10
+
+
+def test_enrich_chunks_orders_by_seq_not_chapter_string():
+    # regression（task item 3）：chapter 字典序 "10" < "2" 曾令 position 档错乱。
+    # 排序必须只用 seq（作品内全局顺序）。
+    chunks = [
+        _chunk_dict("c1", "Chapter 10", 1, "one."),
+        _chunk_dict("c2", "Chapter 2", 2, "two."),
+        _chunk_dict("c3", "Chapter 1", 3, "three."),
+    ]
+    enriched = enrich_chunks(chunks, "pride_and_prejudice")
+    # 保持 seq 顺序（而非 chapter 字典序）
+    assert [c.chapter for c in enriched] == ["Chapter 10", "Chapter 2", "Chapter 1"]
+    assert [c.seq for c in enriched] == [1, 2, 3]
+    assert enriched[0].position == "early"
+    assert enriched[-1].position == "late"
+
+
+def test_select_stratified_sorted_by_seq():
+    # select_stratified 的最终排序也必须按 seq，而非 (chapter, seq)
+    chunks = [
+        _chunk_dict("c1", "Chapter 10", 1, "aaaa."),
+        _chunk_dict("c2", "Chapter 2", 2, "bbbb."),
+        _chunk_dict("c3", "Chapter 1", 3, "cccc."),
+    ]
+    enriched = enrich_chunks(chunks, "pride_and_prejudice")
+    selected = select_stratified(enriched, target=3)
+    assert [c.seq for c in selected] == sorted(c.seq for c in selected)

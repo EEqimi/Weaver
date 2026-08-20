@@ -5,7 +5,7 @@
     position_band ∈ {early, middle, late}   —— 作品内位置
     dialogue_band ∈ {dialogue, mixed, narration} —— 对话/叙述（描述性经叙事档近似）
 
-确定性保证：无随机数；按 (chapter, seq) 排序后均匀间隔选取，结果可复现。
+确定性保证：无随机数；按 seq（作品内全局顺序）排序后均匀间隔选取，结果可复现。
 """
 from __future__ import annotations
 
@@ -78,8 +78,9 @@ def enrich_chunks(chunks: list[dict], work_id: str) -> list[SampleChunk]:
     registry = build_default_registry()
     dial_f = registry.get("dialogue_ratio")
     ms_f = registry.get("mean_sentence_length")
-    # 先按 (chapter, seq) 稳定排序，使 position 定义明确
-    ordered = sorted(chunks, key=lambda c: (str(c.get("chapter", "")), int(c.get("seq", 0))))
+    # 按 seq 排序（seq 在作品内全局单调，是规范文本顺序）。不得用 chapter 字符串
+    # 排序：chapter 的字典序会令 "10" < "2"，导致 position 档错乱（task item 3）。
+    ordered = sorted(chunks, key=lambda c: int(c.get("seq", 0)))
     n = len(ordered)
     out: list[SampleChunk] = []
     for i, c in enumerate(ordered):
@@ -119,8 +120,8 @@ def _allocate(group_sizes: dict[str, int], target: int) -> dict[str, int]:
 
 
 def _evenly_space(items: list[SampleChunk], k: int) -> list[SampleChunk]:
-    """在已按 (chapter, seq) 排序的列表中均匀间隔取 k 个（确定性）。"""
-    items = sorted(items, key=lambda c: (c.chapter, c.seq))
+    """在已按 seq 排序的列表中均匀间隔取 k 个（确定性）。"""
+    items = sorted(items, key=lambda c: c.seq)
     n = len(items)
     if k <= 0:
         return []
@@ -147,7 +148,7 @@ def select_stratified(chunks: list[SampleChunk], target: int) -> list[SampleChun
     selected: list[SampleChunk] = []
     for k in sorted(alloc):
         selected.extend(_evenly_space(strata[k], alloc[k]))
-    return sorted(selected, key=lambda c: (c.chapter, c.seq))
+    return sorted(selected, key=lambda c: c.seq)
 
 
 def _coverage(selected: list[SampleChunk]) -> dict[str, Any]:

@@ -1,5 +1,5 @@
 # knowledge/analysis/strategy_miner.py
-"""Layer C 策略挖掘器（Phase 3 §5），支持两种模式：
+"""Layer C 策略挖掘器（Phase 3 §5 + Phase 3–4.1 标定就绪），支持两种模式：
 
     Mode 1 — 已知策略匹配（match）：判断已注册策略是否出现在文本中，带证据；
     Mode 2 — 候选发现（discover）：当强证据支持时提出新的候选策略。
@@ -7,6 +7,12 @@
 新发现策略绝不立即成为 Author Strategy：以 status="discovered" 进入注册表，
 经多 chunk / 跨作品证据逐步晋升（见 strategies/registry.py 生命周期）。
 默认盲测、无 provider 时返回 AnalysisUnavailable。
+
+标定就绪（task item 5/7）：
+    - 所有 evidence 经共享校验逐字比对 passage，未验证引文显式标记；
+    - 保留 match confidence 与全部**有效**引文（不丢弃置信度、不只留第一条）；
+    - 高置信正向判定必须附带有效证据，否则拒绝（不静默接受编造引文）；
+    - StrategyEvidence 携带 analyzer/schema 溯源。
 """
 from __future__ import annotations
 
@@ -20,9 +26,14 @@ from ..schema.strategy_schema import (
 from ..schema.versions import STRATEGY_MINER_VERSION, STRATEGY_SCHEMA_VERSION
 from ..strategies.registry import StrategyRegistry
 from .base import AnalysisUnavailable, LLMResponseError, parse_json_response
+from .evidence import verify_evidence_quotes
 
 ANALYZER_ID = "StrategyMiner"
 ANALYZER_VERSION = STRATEGY_MINER_VERSION
+
+# 高置信阈值：conf 达到该值即视为"高置信"，正向判定须满足最小已验证证据数
+_CONFIDENT_THRESHOLD = 0.6
+_MIN_EVIDENCE = 1
 
 
 class StrategyMiner:
@@ -66,12 +77,27 @@ class StrategyMiner:
             raise LLMResponseError("strategy_match 的 matches 必须是列表")
         out: list[tuple[str, StrategyEvidence]] = []
         for m in matches:
+            if not isinstance(m, dict):
+                continue
             sid = m.get("strategy_id")
             if not self._registry.has(sid):
                 continue  # 忽略模型杜撰的未知策略
-            quote = (m.get("evidence") or [""])[0]
-            ev = StrategyEvidence(chunk_id=chunk_id, work_id=work_id,
-                                  author_id=author_id, quote=quote)
+            raw_quotes = [q for q in (m.get("evidence") or []) if isinstance(q, str)]
+            check = verify_evidence_quotes(raw_quotes, text)
+            confidence = self._confidence(m)
+            # 高置信正向判定却无有效证据 → 拒绝（不静默接受编造引文）
+            if self._confident_positive(confidence) and check.n_verified < _MIN_EVIDENCE:
+                continue
+            verified = [q for q in check.verified if isinstance(q, str)]
+            unverified = [q for q in check.unverified if isinstance(q, str)]
+            ev = StrategyEvidence(
+                chunk_id=chunk_id, work_id=work_id, author_id=author_id,
+                quote=verified[0] if verified else "",
+                quotes=verified, unverified_quotes=unverified,
+                confidence=confidence,
+                analyzer_id=ANALYZER_ID, analyzer_version=ANALYZER_VERSION,
+                schema_version=STRATEGY_SCHEMA_VERSION,
+            )
             out.append((sid, ev))
         return out
 
@@ -114,16 +140,27 @@ class StrategyMiner:
         for it in items:
             if not isinstance(it, dict) or not it.get("name"):
                 continue
-            out.append(self._to_strategy(it, chunk_id, work_id, author_id))
+            s = self._to_strategy(it, chunk_id, work_id, author_id, text)
+            if s is not None:
+                out.append(s)
         return out
 
     def _to_strategy(self, it: dict, chunk_id: str, work_id: str,
-                     author_id: str) -> CreativeStrategy:
+                     author_id: str, text: str) -> CreativeStrategy | None:
         name = str(it["name"])
         sid = self._slugify(name)
         if self._registry.has(sid):
             sid = f"{sid}_{hashlib.sha256(it.get('description', '').encode()).hexdigest()[:6]}"
         evidence = it.get("evidence") or []
+        if isinstance(evidence, str):
+            evidence = [evidence]
+        evidence = [e for e in evidence if isinstance(e, str)]
+        check = verify_evidence_quotes(evidence, text)
+        confidence = self._confidence(it)
+        # 高置信正向判定却无有效证据 → 拒绝发现该策略
+        if self._confident_positive(confidence) and check.n_verified < _MIN_EVIDENCE:
+            return None
+        verified = [e for e in check.verified if isinstance(e, str)]
         return CreativeStrategy(
             strategy_id=sid,
             name=name,
@@ -131,14 +168,33 @@ class StrategyMiner:
             triggers=[str(t) for t in (it.get("triggers") or [])],
             operations=[str(o) for o in (it.get("operations") or [])],
             intended_effects=[str(e) for e in (it.get("intended_effects") or [])],
-            confidence=float(it.get("confidence", 0.5)) if isinstance(it.get("confidence"), (int, float)) else None,
+            confidence=confidence,
             evidence=[StrategyEvidence(chunk_id=chunk_id, work_id=work_id,
-                                       author_id=author_id, quote=str(e))
-                      for e in evidence],
+                                       author_id=author_id, quote=q, quotes=[q],
+                                       confidence=confidence,
+                                       analyzer_id=ANALYZER_ID,
+                                       analyzer_version=ANALYZER_VERSION,
+                                       schema_version=STRATEGY_SCHEMA_VERSION)
+                      for q in verified],
             source_author=author_id or None,
             source_work=work_id or None,
             status=StrategyStatus.DISCOVERED.value,
         )
+
+    # ---- 共享 ----
+    @staticmethod
+    def _confidence(data: dict) -> float | None:
+        c = data.get("confidence")
+        if c is None or isinstance(c, bool) or not isinstance(c, (int, float)):
+            return None
+        c = float(c)
+        if not 0.0 <= c <= 1.0:
+            return None
+        return c
+
+    @staticmethod
+    def _confident_positive(confidence: float | None) -> bool:
+        return confidence is not None and confidence >= _CONFIDENT_THRESHOLD
 
     @staticmethod
     def _slugify(name: str) -> str:

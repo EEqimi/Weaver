@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from .versions import STRATEGY_SCHEMA_VERSION
+from .versions import STRATEGY_MINER_VERSION, STRATEGY_SCHEMA_VERSION
 
 
 class StrategyStatus(str, Enum):
@@ -28,11 +28,21 @@ class StrategyStatus(str, Enum):
 
 @dataclass
 class StrategyEvidence:
-    """一条策略证据：来自哪个 chunk/work 的哪段引用。"""
+    """一条策略证据：来自哪个 chunk/work 的哪段引用。
+
+    task item 7：保留 match confidence 与全部**有效**证据引文（而非只保留第一条、
+    丢弃置信度）；未验证引文显式标记；附 analyzer/schema 溯源。
+    """
     chunk_id: str
     work_id: str
     author_id: str
-    quote: str = ""
+    quote: str = ""                                   # 首条有效引文（向后兼容）
+    quotes: list[str] = field(default_factory=list)   # 全部有效引文
+    unverified_quotes: list[str] = field(default_factory=list)  # 无法验证的引文
+    confidence: float | None = None                   # match confidence（不丢弃）
+    analyzer_id: str = "StrategyMiner"
+    analyzer_version: str = STRATEGY_MINER_VERSION
+    schema_version: str = STRATEGY_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,6 +50,12 @@ class StrategyEvidence:
             "work_id": self.work_id,
             "author_id": self.author_id,
             "quote": self.quote,
+            "quotes": self.quotes,
+            "unverified_quotes": self.unverified_quotes,
+            "confidence": self.confidence,
+            "analyzer_id": self.analyzer_id,
+            "analyzer_version": self.analyzer_version,
+            "schema_version": self.schema_version,
         }
 
 

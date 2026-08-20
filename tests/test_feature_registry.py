@@ -65,3 +65,19 @@ def test_candidate_core_marked_provisional():
     reg = build_default_registry()
     for f in reg.all():
         assert f.control_role != ControlRole.CORE, f.id
+
+
+def test_all_llm_features_have_measurement_protocol():
+    # task item 1：所有 LLM 派生特征必须有显式测量协议（frequency 或 ordinal），
+    # 绝不要求模型"返回一个裸 float"。
+    reg = build_default_registry()
+    llm = [f for f in reg.all() if f.analyzer == "LlmFeatureAnalyzer"]
+    assert llm, "应存在 LLM 派生特征"
+    for f in llm:
+        assert f.measurement_protocol in ("frequency", "ordinal"), f.id
+    freq = {f.id for f in llm if f.measurement_protocol == "frequency"}
+    ordi = {f.id for f in llm if f.measurement_protocol == "ordinal"}
+    assert freq == {"metaphor_frequency", "simile_frequency", "irony_frequency"}
+    assert ordi == {"irony_intensity", "narrator_evaluative_intervention",
+                    "psychological_representation", "emotional_restraint",
+                    "emotional_intensity"}

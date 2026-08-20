@@ -6,18 +6,20 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 3–4 (deterministic analysis + aggregation) — COMPLETE, review pending |
-| **Last completed checkpoint** | Phase 3–4 deterministic run (Layer A + Layer D + profiles + sampling) |
+| **Current phase** | Phase 3–4.1 (calibration readiness fix) — COMPLETE, review pending |
+| **Last completed checkpoint** | Phase 3–4.1 calibration-readiness fix (leak-free CV, measurement rubrics, evidence verification, aggregation provenance) |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
 - Corpus pipeline: RAW → CLEAN → CHUNKS (1000/2000/4000) → METADATA/QC (deterministic, raw read-only).
 - Feature Registry: 39 features, data-driven routing by analyzer name.
 - Layer A deterministic analyzer: 22 features.
-- Layer D stylometry: extraction + Burrows Delta + PCA + clustering + SVM/logreg validation (GroupKFold, held-out).
+- Layer D stylometry: extraction + Burrows Delta + PCA + clustering + SVM/logreg validation (GroupKFold, held-out), leak-free grouped CV (per-fold vectorizer refit), function-word/word-unigram overlap audit.
 - LLM provider abstraction (cacheable, unconfigured-safe).
-- Profile aggregation: `ChunkProfile → WorkProfile → AuthorProfile`, type-aware.
-- Deterministic stratified sampling manifest.
+- Profile aggregation: `ChunkProfile → WorkProfile → AuthorProfile`, type-aware, preserving uncertainty/evidence/provenance.
+- Deterministic stratified sampling manifest (`seq`-ordered).
+- Measurement rubrics: frequency vs ordinal protocols for all LLM-derived features.
+- Shared evidence verification (NFC + punctuation normalization + substring match).
 
 ## What is partially implemented
 - Layer A judgment/hybrid, Layer B (narrative), Layer C (strategies) analyzers are **written but not run** — they need a configured LLM and the calibration sample.
@@ -35,18 +37,23 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
-- **85 tests passed** (32 Phase 1–2 + 53 Phase 3–4).
+- **97 tests passed** (was 85). New regression tests cover measurement rubrics,
+  frequency-vs-ordinal LLM contracts, evidence verification, calibration `seq`
+  ordering, aggregation uncertainty/evidence preservation, and leak-free CV.
 
 ## Latest experiment results (deterministic, no LLM)
 - Layer A: 2,328 TRAIN chunks × 22 features.
-- Layer D: 954 features (154 fw + 400 char-3gram + 400 word-unigram).
-- Grouped leave-one-work-out CV (SVM, class-weighted): `[0.852, 0.922, 0.845, 0.916]`.
-- Held-out accuracy: `0.756`.
-- Calibration sample: 40 chunks (4 × 10), deterministic stratified, held-out excluded.
+- Layer D: 954 features (154 fw + 400 char-3gram + 400 word-unigram, function
+  words excluded from word-unigram; `n_function_word_overlap=0`).
+- Grouped leave-one-work-out CV (SVM, class-weighted), **leak-free**:
+  `[0.819, 0.924, 0.794, 0.905]` (mean ≈ 0.861; was leaky 0.884).
+- Held-out accuracy: `0.745` (was 0.756).
+- Calibration sample: 40 chunks (4 × 10), `seq`-ordered deterministic stratified,
+  held-out excluded.
 
 ## Current blockers / review items
-- **Awaiting review** of the Phase 3–4 deterministic checkpoint before any LLM
-  spend. `candidate_core` features must remain un-promoted.
+- **Awaiting review** of the Phase 3–4.1 calibration-readiness checkpoint before
+  any LLM spend. `candidate_core` features must remain un-promoted.
 
 ## Next planned action
 - On approval: run the sampled LLM calibration (Layer A judgment/hybrid, B, C on

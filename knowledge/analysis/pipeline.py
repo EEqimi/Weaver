@@ -28,7 +28,7 @@ from ..schema.versions import (
     AGGREGATION_VERSION, SAMPLING_VERSION, SCHEMA_VERSION, STYLOMETRY_VERSION,
 )
 from .statistical_analyzer import StatisticalAnalyzer
-from ..stylometry.validation import evaluate_heldout, grouped_cross_validation
+from ..stylometry.validation import evaluate_heldout, grouped_cross_validation_texts
 from ..stylometry.extract import StylometricVectorizer
 
 DEFAULT_TARGET_CHARS = 2000
@@ -123,8 +123,11 @@ def run_layer_d(train_chunks: dict[str, list[dict]],
         "n_train_chunks": len(tr_texts),
         "n_heldout_chunks": len(ho_texts),
         "n_features": int(X_train.shape[1]),
-        "grouped_cv_accuracy": grouped_cross_validation(
-            X_train, tr_authors, tr_works, classifier="svm"),
+        # 泄漏安全：每折重拟合向量器（左出作品不参与词汇选择），见 validation.py
+        "grouped_cv_accuracy": grouped_cross_validation_texts(
+            tr_texts, tr_authors, tr_works, classifier="svm"),
+        "grouped_cv_leak_free": True,
+        "stylometric_family_overlap": vec.family_overlap(),
         "heldout_eval": {},
     }
     if ho_texts:

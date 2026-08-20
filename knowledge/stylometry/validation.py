@@ -11,6 +11,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import cross_val_score, GroupKFold
 from sklearn.svm import SVC
 
+from .extract import StylometricVectorizer
+
 
 def split_by_work(work_ids: list[str], held_out_works: list[str]) -> tuple[list[int], list[int]]:
     """按作品切分：held_out_works 全部作为测试，其余作为训练（无作品泄漏）。"""
@@ -47,6 +49,10 @@ def grouped_cross_validation(X: np.ndarray, labels: list[str], work_ids: list[st
                              classifier: str = "svm", cv: int | None = None):
     """按作品分组的交叉验证（GroupKFold，杜绝同一作品 chunk 跨 fold 泄漏）。
 
+    注意：本函数接收**已向量化**的特征矩阵 X。若 X 的词汇表在分组 CV 之前
+    用全部作品拟合，则左出作品会参与词汇选择，造成特征选择泄漏。对原始文本
+    做泄漏安全的 CV 请使用 grouped_cross_validation_texts（每折重拟合向量器）。
+
     返回每折准确率列表。
     """
     y, _ = _labels_to_int(labels)
@@ -55,6 +61,42 @@ def grouped_cross_validation(X: np.ndarray, labels: list[str], work_ids: list[st
     n_folds = cv if cv is not None else len(set(work_ids))
     return list(cross_val_score(clf, X, y, groups=groups,
                                 cv=GroupKFold(n_splits=n_folds)))
+
+
+def grouped_cross_validation_texts(texts: list[str], labels: list[str],
+                                   work_ids: list[str], classifier: str = "svm",
+                                   cv: int | None = None,
+                                   vectorizer: StylometricVectorizer | None = None):
+    """按作品分组的泄漏安全交叉验证（Phase 3–4.1 task item 2）。
+
+    对每一折：
+        训练作品 → fit StylometricVectorizer → transform 折内训练数据 → fit 分类器
+        左出作品 → 用该折拟合的向量器 transform → 评估
+    因此左出作品绝不参与字符/词 unigram 的词汇选择（杜绝特征选择泄漏）。
+
+    返回每折准确率列表（GroupKFold 顺序）。
+    """
+    texts = list(texts)
+    labels = list(labels)
+    work_ids = list(work_ids)
+    y, _ = _labels_to_int(labels)
+    groups = np.array([_work_group_id(w, work_ids) for w in work_ids])
+    n_folds = cv if cv is not None else len(set(work_ids))
+    base = vectorizer if vectorizer is not None else StylometricVectorizer()
+    accs: list[float] = []
+    for train_idx, val_idx in GroupKFold(n_splits=n_folds).split(texts, y, groups):
+        # 每折独立拟合向量器（使用与 base 相同的配置，避免共享已拟合的词汇表）
+        fold_vec = StylometricVectorizer(
+            char_n=base.char_n, char_top_k=base.char_top_k,
+            word_top_k=base.word_top_k, function_words=base.function_words,
+        )
+        X_train = fold_vec.fit_transform([texts[i] for i in train_idx])
+        X_val = fold_vec.transform([texts[i] for i in val_idx])
+        clf = _make_classifier(classifier)
+        clf.fit(X_train, y[train_idx])
+        preds = clf.predict(X_val)
+        accs.append(float((preds == y[val_idx]).mean()))
+    return accs
 
 
 def _make_classifier(kind: str):

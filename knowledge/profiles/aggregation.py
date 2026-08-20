@@ -108,20 +108,51 @@ def _numeric_values(fvs: list[FeatureValue]) -> list[float]:
 
 
 def aggregate_feature_values(fvs: list[FeatureValue]) -> dict[str, Any]:
-    """按 value_type 分派聚合。空列表返回 {n: 0}。"""
+    """按 value_type 分派聚合，并保留不确定性与证据溯源（task item 4）。
+
+    保留内容：
+        - value summary/distribution（连续量绝不只存均值）；
+        - n_total / n_valid / n_missing（显式区分缺失，绝不静默丢弃）；
+        - confidence 独立汇总（**绝不并入 value**）；
+        - evidence refs、analyzer id/version、schema version、provenance（溯源）。
+    空列表返回 {n: 0}。
+    """
     if not fvs:
         return {"n": 0}
     value_type = fvs[0].value_type
+    n_total = len(fvs)
+    valid = [fv for fv in fvs if fv.value is not None]
+    n_valid = len(valid)
+    n_missing = n_total - n_valid
+
     if value_type == "categorical":
-        return aggregate_categorical([str(fv.value) for fv in fvs if fv.value is not None])
-    if value_type == "distribution":
-        dists = [fv.value for fv in fvs if isinstance(fv.value, dict)]
-        return aggregate_distribution(dists)
-    # continuous / discrete 走数值聚合
-    vals = _numeric_values(fvs)
-    summary = aggregate_continuous(vals)
-    summary["n"] = len(fvs)  # 覆盖：n 表示 chunk 样本数，而非数值个数
-    return summary
+        summary = aggregate_categorical([str(fv.value) for fv in valid])
+    elif value_type == "distribution":
+        summary = aggregate_distribution([fv.value for fv in valid if isinstance(fv.value, dict)])
+    else:
+        # continuous / discrete 走数值聚合
+        summary = aggregate_continuous(_numeric_values(valid))
+    summary["n"] = n_valid  # 对齐到有效样本数（n_total 另存，不静默丢弃缺失）
+
+    # confidence 独立汇总（绝不并入 value）
+    confs = [float(fv.confidence) for fv in fvs
+             if isinstance(fv.confidence, (int, float)) and not isinstance(fv.confidence, bool)]
+    confidence = aggregate_continuous(confs) if confs else {"n": 0, "mean": None}
+
+    return {
+        **summary,
+        "n_total": n_total,
+        "n_valid": n_valid,
+        "n_missing": n_missing,
+        "value_type": value_type,
+        "measurement_type": fvs[0].measurement_type,
+        "confidence": confidence,
+        "evidence_refs": [fv.evidence for fv in fvs if fv.evidence],
+        "analyzer_ids": sorted({fv.analyzer_id for fv in fvs if fv.analyzer_id}),
+        "analyzer_versions": sorted({fv.analyzer_version for fv in fvs if fv.analyzer_version}),
+        "schema_versions": sorted({fv.schema_version for fv in fvs if fv.schema_version}),
+        "provenance": [fv.provenance for fv in fvs if fv.provenance],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -197,15 +228,37 @@ class AuthorProfile:
 # narrative 聚合
 # --------------------------------------------------------------------------- #
 def aggregate_narrative(obs: list[NarrativeObservation]) -> dict[str, Any]:
-    """把一组 chunk 的叙事观察聚合为字段级摘要（枚举 → 类别分布；比例 → 均值）。"""
+    """聚合叙事观察：字段级摘要 + 不确定性/证据溯源（task item 4/6）。
+
+    - 枚举 → 类别分布（含显式 unknown/insufficient_evidence/not_observable，
+      绝不把缺失字段伪装成已观察事实）；
+    - 比例 → 逐类均值；
+    - 额外保留逐 chunk 的证据引用、未验证引文、比例问题、confidence 汇总与溯源。
+    """
     if not obs:
         return {"n": 0}
-    out: dict[str, Any] = {"n": len(obs)}
+    n_total = len(obs)
+    out: dict[str, Any] = {
+        "n": n_total, "n_total": n_total, "n_valid": n_total, "n_missing": 0,
+    }
     for f in _NARRATIVE_ENUM_FIELDS:
         out[f] = aggregate_categorical([getattr(o, f) for o in obs])
     for f, dims in _NARRATIVE_DIST_FIELDS.items():
         dists = [{k: v for k, v in getattr(o, f).items() if k in dims} for o in obs]
         out[f] = aggregate_distribution([d for d in dists if d])
+
+    # 证据与溯源：保留逐 chunk 引用，绝不静默丢弃（task item 4）
+    confs = [float(o.confidence) for o in obs
+             if isinstance(o.confidence, (int, float)) and not isinstance(o.confidence, bool)]
+    out["confidence"] = aggregate_continuous(confs) if confs else {"n": 0, "mean": None}
+    out["observed_evidence"] = {o.chunk_id: list(o.observed_evidence) for o in obs
+                                if o.observed_evidence}
+    out["unverified_evidence"] = {o.chunk_id: list(o.unverified_evidence) for o in obs
+                                  if o.unverified_evidence}
+    out["proportion_issues"] = {o.chunk_id: list(o.proportion_issues) for o in obs
+                                if o.proportion_issues}
+    out["schema_versions"] = sorted({o.schema_version for o in obs if o.schema_version})
+    out["chunk_provenance"] = [o.chunk_id for o in obs]
     return out
 
 

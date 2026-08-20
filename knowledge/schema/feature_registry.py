@@ -56,6 +56,12 @@ class FeatureDefinition:
     analyzer: str               # analyzer 名称（Registry 解耦，不硬编码分支）
     schema_version: str = FEATURE_SCHEMA_VERSION
     description: str = ""
+    # 测量协议标签（LLM 派生特征必填；详见 schema/rubrics.py）：
+    #   "frequency" —— LLM 识别实例，程序计数/折算
+    #   "ordinal"   —— 锚定序数/程度量表（每档有显式定义）
+    measurement_protocol: str = ""
+    # 测量协议版本（与 analyzer/schema 版本分离，保证量表变更可追溯）
+    protocol_version: str = FEATURE_SCHEMA_VERSION
 
 
 class FeatureRegistry:
@@ -95,11 +101,12 @@ class FeatureRegistry:
 
 
 # ---- 便捷构造 ----
-def _f(fid, category, mt, vt, role, norm, analyzer, desc=""):
+def _f(fid, category, mt, vt, role, norm, analyzer, desc="", protocol=""):
     return FeatureDefinition(
         id=fid, category=category, measurement_type=MeasurementType(mt),
         value_type=ValueType(vt), control_role=ControlRole(role),
         normalization=norm, analyzer=analyzer, description=desc,
+        measurement_protocol=protocol,
     )
 
 
@@ -111,7 +118,7 @@ def build_default_registry() -> FeatureRegistry:
     """
     reg = FeatureRegistry()
     S, N, H, J = ("statistical", "nlp", "hybrid", "judgment")
-    CONT, DIST = ("continuous", "distribution")
+    CONT, DISC, DIST = ("continuous", "discrete", "distribution")
 
     defs = [
         # —— 1. Lexical & Register ——
@@ -169,32 +176,42 @@ def build_default_registry() -> FeatureRegistry:
            "descriptive", "none", "StatisticalAnalyzer"),
 
         # —— 4. Rhetoric & Imagery ——
+        # frequency-like：LLM 识别隐喻/明喻实例，程序计数（见 rubrics.py）
         _f("metaphor_frequency", "rhetoric_imagery", H, CONT, "experimental",
-           "zscore", "LlmFeatureAnalyzer", "隐喻频率（LLM evidence）"),
+           "zscore", "LlmFeatureAnalyzer", "隐喻频率（LLM evidence）",
+           protocol="frequency"),
         _f("simile_frequency", "rhetoric_imagery", H, CONT, "experimental",
-           "zscore", "LlmFeatureAnalyzer"),
+           "zscore", "LlmFeatureAnalyzer", "明喻频率（LLM evidence）",
+           protocol="frequency"),
 
         # —— 5. Voice & Pragmatics ——
         _f("irony_frequency", "voice_pragmatics", J, CONT, "experimental",
-           "zscore", "LlmFeatureAnalyzer"),
-        _f("irony_intensity", "voice_pragmatics", J, CONT, "experimental",
-           "zscore", "LlmFeatureAnalyzer"),
-        _f("narrator_evaluative_intervention", "voice_pragmatics", J, CONT,
-           "experimental", "zscore", "LlmFeatureAnalyzer"),
+           "zscore", "LlmFeatureAnalyzer", "反讽频率（LLM evidence）",
+           protocol="frequency"),
+        # intensity/degree-like：锚定序数 0–4（见 rubrics.py 的 ordinal 协议）
+        _f("irony_intensity", "voice_pragmatics", J, DISC, "experimental",
+           "none", "LlmFeatureAnalyzer", "反讽强度（0–4 序数）",
+           protocol="ordinal"),
+        _f("narrator_evaluative_intervention", "voice_pragmatics", J, DISC,
+           "experimental", "none", "LlmFeatureAnalyzer",
+           "叙述者评价性介入程度（0–4 序数）", protocol="ordinal"),
 
         # —— 6. Character Representation ——
         _f("dialogue_ratio", "character_representation", S, CONT, "candidate_core",
            "corpus_percentile", "StatisticalAnalyzer", "对话占比"),
         _f("quotation_density", "character_representation", S, CONT, "descriptive",
            "none", "StatisticalAnalyzer", "引号密度（双引号/千词）"),
-        _f("psychological_representation", "character_representation", H, CONT,
-           "experimental", "zscore", "LlmFeatureAnalyzer"),
+        _f("psychological_representation", "character_representation", H, DISC,
+           "experimental", "none", "LlmFeatureAnalyzer",
+           "心理呈现程度（0–4 序数）", protocol="ordinal"),
 
         # —— 7. Emotion & Semantic Texture ——
-        _f("emotional_restraint", "emotion_semantics", J, CONT, "experimental",
-           "zscore", "LlmFeatureAnalyzer", "情感克制"),
-        _f("emotional_intensity", "emotion_semantics", H, CONT, "experimental",
-           "zscore", "LlmFeatureAnalyzer"),
+        _f("emotional_restraint", "emotion_semantics", J, DISC, "experimental",
+           "none", "LlmFeatureAnalyzer", "情感克制（0–4 序数）",
+           protocol="ordinal"),
+        _f("emotional_intensity", "emotion_semantics", H, DISC, "experimental",
+           "none", "LlmFeatureAnalyzer", "情绪强度（0–4 序数）",
+           protocol="ordinal"),
 
         # —— 8. Discourse & Cohesion ——
         _f("connective_density", "discourse_cohesion", S, CONT, "descriptive",

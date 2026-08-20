@@ -4,5 +4,6 @@ data/
 __pycache__/
 .pytest_cache/
 .DS_Store
+.venv/
 
 # 原始语料在仓库之外（wensigongfang/text/），本仓库不追踪

@@ -72,9 +72,13 @@ class StylometricVectorizer:
                                          ngram_range=(self.char_n, self.char_n),
                                          max_features=self.char_top_k, lowercase=True)
         self._char_vec.fit(texts)
+        # word-unigram 排除功能词（stop_words），避免与显式功能词族重复加权
+        # （Phase 3–4.1 task item 8）。该排除基于固定的 FUNCTION_WORDS 封闭词表，
+        # 与任何 held-out 作品无关，不构成用 held-out 调参。
         self._word_vec = CountVectorizer(analyzer="word", ngram_range=(1, 1),
                                          max_features=self.word_top_k,
-                                         token_pattern=_WORD_PATTERN, lowercase=True)
+                                         token_pattern=_WORD_PATTERN, lowercase=True,
+                                         stop_words=list(self.function_words))
         self._word_vec.fit(texts)
         self.feature_names_ = (
             [f"fw:{w}" for w in self._fw_vec.get_feature_names_out()]
@@ -95,3 +99,20 @@ class StylometricVectorizer:
 
     def fit_transform(self, texts: list[str]) -> np.ndarray:
         return self.fit(texts).transform(texts)
+
+    def family_overlap(self) -> dict:
+        """审计 word-unigram 族与显式功能词族的重叠（task item 8）。
+
+        返回 word-unigram 词汇项数、与 FUNCTION_WORDS 重复的词条及数量。
+        fit 后调用；未 fit 返回空结构。
+        """
+        if not self.feature_names_:
+            return {"n_word_unigram": 0, "n_function_word_overlap": 0, "overlap": []}
+        fw_set = set(self.function_words)
+        word_features = [n[5:] for n in self.feature_names_ if n.startswith("word:")]
+        overlap = sorted(w for w in word_features if w in fw_set)
+        return {
+            "n_word_unigram": len(word_features),
+            "n_function_word_overlap": len(overlap),
+            "overlap": overlap,
+        }

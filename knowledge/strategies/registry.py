@@ -59,7 +59,8 @@ class StrategyRegistry:
     def _evidence_status(s: CreativeStrategy) -> str:
         chunks = {e.chunk_id for e in s.evidence}
         works = {e.work_id for e in s.evidence}
-        authors = {e.author_id for e in s.evidence}
+        # 仅统计非空 author（task item 7）：空 author 不构成"同一作者"的跨作品证据
+        authors = {e.author_id for e in s.evidence if e.author_id}
         if len(works) >= 2 and len(authors) == 1:
             return StrategyStatus.VALIDATED.value
         if len(chunks) >= 2:

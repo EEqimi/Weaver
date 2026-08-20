@@ -16,6 +16,7 @@ from ..schema.narrative_schema import (
 )
 from ..schema.versions import NARRATIVE_ANALYZER_VERSION, NARRATIVE_SCHEMA_VERSION
 from .base import AnalysisUnavailable, parse_json_response
+from .evidence import verify_evidence_quotes
 
 ANALYZER_ID = "NarrativeAnalyzer"
 ANALYZER_VERSION = NARRATIVE_ANALYZER_VERSION
@@ -72,4 +73,9 @@ class NarrativeAnalyzer:
         data = parse_json_response(raw)
         data = dict(data)
         data["chunk_id"] = chunk_id
-        return validate_narrative(data)
+        obs = validate_narrative(data)
+        # 证据校验（task item 5）：逐字比对 passage，未验证引文显式标记，不静默丢弃
+        check = verify_evidence_quotes(obs.observed_evidence, text)
+        obs.observed_evidence = [e for e in check.verified if isinstance(e, str)]
+        obs.unverified_evidence = [e for e in check.unverified if isinstance(e, str)]
+        return obs

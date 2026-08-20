@@ -7,7 +7,8 @@ from knowledge.stylometry.clustering import pca
 from knowledge.stylometry.delta import burrows_delta, cosine_distance, zscore_matrix
 from knowledge.stylometry.extract import FUNCTION_WORDS, StylometricVectorizer
 from knowledge.stylometry.validation import (
-    evaluate_heldout, grouped_cross_validation, split_by_work,
+    evaluate_heldout, grouped_cross_validation, grouped_cross_validation_texts,
+    split_by_work,
 )
 
 
@@ -24,6 +25,18 @@ def test_stylometric_vectorizer_shape():
 def test_stylometric_vectorizer_requires_fit():
     with pytest.raises(RuntimeError):
         StylometricVectorizer().transform(["x"])
+
+
+def test_word_unigram_excludes_function_words():
+    # task item 8：word-unigram 族排除功能词，避免与显式功能词族重复加权
+    texts = ["the cat sat on the mat and it purred",
+             "he walked alone down the lane and did not look back"]
+    vec = StylometricVectorizer()
+    vec.fit(texts)
+    ov = vec.family_overlap()
+    assert ov["n_word_unigram"] > 0
+    assert ov["n_function_word_overlap"] == 0
+    assert ov["overlap"] == []
 
 
 # ---- Burrows Delta ----
@@ -100,3 +113,17 @@ def test_evaluate_heldout():
         X, labels, works, ["david_copperfield"], classifier="svm")
     assert acc == 1.0
     assert set(preds) == {"dickens"}
+
+
+def test_grouped_cross_validation_texts_leak_free():
+    # task item 2：对原始文本做泄漏安全分组 CV——每折重拟合向量器，
+    # 左出作品绝不参与词汇选择。此处验证按 GroupKFold 返回每折分数。
+    texts = (["the quick brown fox jumps over the lazy dog"] * 10
+             + ["the quick brown fox jumps over the lazy dog"] * 10
+             + ["a gentle rain fell on the quiet garden and flowers bloomed"] * 10
+             + ["a gentle rain fell on the quiet garden and flowers bloomed"] * 10)
+    labels = ["austen"] * 20 + ["dickens"] * 20
+    works = (["p"] * 10 + ["e"] * 10 + ["g"] * 10 + ["d"] * 10)
+    scores = grouped_cross_validation_texts(texts, labels, works, classifier="svm")
+    assert len(scores) == 4
+    assert all(0.0 <= s <= 1.0 for s in scores)
