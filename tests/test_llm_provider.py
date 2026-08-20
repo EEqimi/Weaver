@@ -43,16 +43,21 @@ def test_narrative_analyzer_unavailable_without_provider():
 
 # ---- LLM schema 校验 ----
 def test_llm_feature_analyzer_valid_frequency_response():
-    # frequency 协议：LLM 返回 instances 列表，程序对已验证实例计数（task item 1/5）
+    # frequency 协议：LLM 返回 instances 列表，程序对已验证实例计数并归一化为
+    # 每 1000 词的率（task item 1）。PASSAGE 共 12 词。
     resp = json.dumps({"instances": [{"evidence": "did not once look back",
                                       "label": "negation"}],
                        "confidence": 0.9, "reasoning_summary": "克制表达"})
     a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
     fv = a.analyze(PASSAGE, _judgment_feature(), chunk_id="c1")
     assert fv.feature_id == "irony_frequency"
-    assert fv.value == 1.0                      # 1 条已验证实例
+    assert fv.raw_value == 1.0                  # raw_count = 已验证实例数
+    assert fv.value == pytest.approx(1000 / 12)  # value = 1 / 12 × 1000
     assert fv.evidence == ["did not once look back"]
     assert fv.provenance["chunk_id"] == "c1"
+    assert fv.provenance["raw_count"] == 1
+    assert fv.provenance["exposure_tokens"] == 12
+    assert fv.provenance["unit"] == "instances per 1000 tokens"
     assert fv.provenance["n_instances_verified"] == 1
 
 
@@ -104,6 +109,85 @@ def test_llm_feature_analyzer_confidence_out_of_range():
     a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
     with pytest.raises(LLMResponseError):
         a.analyze(PASSAGE, _judgment_feature())
+
+
+def test_llm_feature_analyzer_frequency_normalizes_to_rate():
+    # task item 1：多条实例 → value = raw_count / tokens × 1000
+    resp = json.dumps({"instances": [
+        {"evidence": "walked alone", "label": "a"},
+        {"evidence": "did not once look back", "label": "b"},
+    ], "confidence": 0.8, "reasoning_summary": "..."})
+    a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
+    fv = a.analyze(PASSAGE, _judgment_feature())
+    assert fv.raw_value == 2.0
+    assert fv.value == pytest.approx(2 * 1000 / 12)
+    assert fv.provenance["raw_count"] == 2
+    assert fv.provenance["exposure_tokens"] == 12
+
+
+# ---- ordinal 评估状态（task item 2）----
+def test_llm_feature_analyzer_ordinal_not_observable():
+    resp = json.dumps({"assessment_status": "not_observable", "level": None,
+                       "confidence": 0.5, "reasoning_summary": "..."})
+    a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
+    fv = a.analyze(PASSAGE, _ordinal_feature(), chunk_id="c1")
+    assert fv.value is None                 # 绝不折算成 0
+    assert fv.raw_value is None
+    assert fv.provenance["assessment_status"] == "not_observable"
+
+
+def test_llm_feature_analyzer_ordinal_insufficient_evidence():
+    resp = json.dumps({"assessment_status": "insufficient_evidence", "level": None,
+                       "confidence": 0.4, "reasoning_summary": "..."})
+    a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
+    fv = a.analyze(PASSAGE, _ordinal_feature())
+    assert fv.value is None
+    assert fv.provenance["assessment_status"] == "insufficient_evidence"
+
+
+def test_llm_feature_analyzer_ordinal_observed_requires_null_level_when_unobservable():
+    # 状态非 observed 时 level 必须为 null，否则报错
+    resp = json.dumps({"assessment_status": "not_observable", "level": 0,
+                       "confidence": 0.5})
+    a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
+    with pytest.raises(LLMResponseError):
+        a.analyze(PASSAGE, _ordinal_feature())
+
+
+def test_llm_feature_analyzer_ordinal_invalid_status():
+    resp = json.dumps({"assessment_status": "maybe", "level": None, "confidence": 0.5})
+    a = LLMFeatureAnalyzer(DummyLLMProvider(response=resp))
+    with pytest.raises(LLMResponseError):
+        a.analyze(PASSAGE, _ordinal_feature())
+
+
+# ---- narrative 证据充分性（task item 3）----
+def test_narrative_downgrades_high_confidence_without_verified_evidence():
+    # 高置信 + 实质判断（pov=third）+ 零已验证证据 → 确定性降级
+    resp = json.dumps({"pov": "third", "focalization": "internal",
+                       "perspective_stability": "stable", "narrative_distance": "medium",
+                       "narrator_presence": "low", "narrator_evaluative_intervention": "low",
+                       "information_access": "limited", "temporal_order": "chronological",
+                       "observed_evidence": ["totally fabricated quote"],
+                       "confidence": 0.95})
+    a = NarrativeAnalyzer(DummyLLMProvider(response=resp))
+    obs = a.analyze(PASSAGE)
+    assert obs.confidence == 0.0
+    assert "high_confidence_substantive_without_verified_evidence" in obs.evidence_issues
+
+
+def test_narrative_keeps_verified_evidence_confidence():
+    # 有已验证证据时，高置信不降级
+    resp = json.dumps({"pov": "third", "focalization": "internal",
+                       "perspective_stability": "stable", "narrative_distance": "medium",
+                       "narrator_presence": "low", "narrator_evaluative_intervention": "low",
+                       "information_access": "limited", "temporal_order": "chronological",
+                       "observed_evidence": ["did not once look back"],
+                       "confidence": 0.95})
+    a = NarrativeAnalyzer(DummyLLMProvider(response=resp))
+    obs = a.analyze(PASSAGE)
+    assert obs.confidence == 0.95
+    assert obs.evidence_issues == []
 
 
 def test_narrative_analyzer_rejects_illegal_enum():

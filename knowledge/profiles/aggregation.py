@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable
 from ..schema.narrative_schema import (
     DETAIL_DIMENSIONS, PACE_DIMENSIONS, NarrativeObservation,
 )
+from ..schema.rubrics import ASSESSMENT_INSUFFICIENT, ASSESSMENT_NOT_OBSERVABLE
 from ..schema.style_schema import FeatureValue
 from ..schema.strategy_schema import StrategyEvidence
 from ..schema.versions import AGGREGATION_VERSION, NARRATIVE_SCHEMA_VERSION
@@ -107,32 +108,63 @@ def _numeric_values(fvs: list[FeatureValue]) -> list[float]:
     return out
 
 
-def aggregate_feature_values(fvs: list[FeatureValue]) -> dict[str, Any]:
-    """按 value_type 分派聚合，并保留不确定性与证据溯源（task item 4）。
+def _assessment_status(fv: FeatureValue) -> str:
+    """从 provenance 提取序数特征的评估状态（task item 2/7）。"""
+    prov = fv.provenance
+    if isinstance(prov, dict):
+        s = prov.get("assessment_status", "")
+        if s in (ASSESSMENT_INSUFFICIENT, ASSESSMENT_NOT_OBSERVABLE):
+            return s
+    return ""
+
+
+def aggregate_feature_values(fvs: list[FeatureValue],
+                             n_expected: int | None = None) -> dict[str, Any]:
+    """按 value_type 分派聚合，并保留不确定性与证据溯源（task item 4/7）。
 
     保留内容：
         - value summary/distribution（连续量绝不只存均值）；
-        - n_total / n_valid / n_missing（显式区分缺失，绝不静默丢弃）；
+        - n_expected / n_valid / n_missing / n_unobservable / n_insufficient
+          （n_expected 为"预期接受该特征分析的 chunk 数"，缺失与不可观察绝不静默丢弃，
+          绝不通过合成零值伪造缺失 FeatureValue）；
         - confidence 独立汇总（**绝不并入 value**）；
         - evidence refs、analyzer id/version、schema version、provenance（溯源）。
-    空列表返回 {n: 0}。
+
+    n_expected 缺省为 len(fvs)（当前确定性流水线中每个特征在全部 chunk 上产出）。
+    空列表返回 {n: 0, n_expected: 0, ...}。
     """
     if not fvs:
-        return {"n": 0}
+        n_exp = n_expected if n_expected is not None else 0
+        return {
+            "n": 0, "n_expected": n_exp, "n_total": n_exp,
+            "n_valid": 0, "n_missing": n_exp,
+            "n_unobservable": 0, "n_insufficient": 0,
+        }
     value_type = fvs[0].value_type
-    n_total = len(fvs)
-    valid = [fv for fv in fvs if fv.value is not None]
-    n_valid = len(valid)
-    n_missing = n_total - n_valid
+    n_present = len(fvs)
+    n_expected = n_present if n_expected is None else n_expected
+
+    # 分类 present 的 FeatureValue：observed / unobservable / insufficient / missing
+    observable = [fv for fv in fvs if fv.value is not None]
+    unobservable = [fv for fv in fvs
+                    if fv.value is None and _assessment_status(fv) == ASSESSMENT_NOT_OBSERVABLE]
+    insufficient = [fv for fv in fvs
+                    if fv.value is None and _assessment_status(fv) == ASSESSMENT_INSUFFICIENT]
+    n_valid = len(observable)
+    n_unobservable = len(unobservable)
+    n_insufficient = len(insufficient)
+    # 其余（无 FeatureValue 的 chunk + value None 且无明确状态的）记入 missing
+    n_missing = max(0, n_expected - n_valid - n_unobservable - n_insufficient)
 
     if value_type == "categorical":
-        summary = aggregate_categorical([str(fv.value) for fv in valid])
+        summary = aggregate_categorical([str(fv.value) for fv in observable])
     elif value_type == "distribution":
-        summary = aggregate_distribution([fv.value for fv in valid if isinstance(fv.value, dict)])
+        summary = aggregate_distribution([fv.value for fv in observable
+                                          if isinstance(fv.value, dict)])
     else:
-        # continuous / discrete 走数值聚合
-        summary = aggregate_continuous(_numeric_values(valid))
-    summary["n"] = n_valid  # 对齐到有效样本数（n_total 另存，不静默丢弃缺失）
+        # continuous / discrete 走数值聚合（unobservable 的 None 值绝不拉低均值）
+        summary = aggregate_continuous(_numeric_values(observable))
+    summary["n"] = n_valid  # 对齐到有效样本数
 
     # confidence 独立汇总（绝不并入 value）
     confs = [float(fv.confidence) for fv in fvs
@@ -141,9 +173,12 @@ def aggregate_feature_values(fvs: list[FeatureValue]) -> dict[str, Any]:
 
     return {
         **summary,
-        "n_total": n_total,
+        "n_expected": n_expected,
+        "n_total": n_expected,   # 兼容旧字段：n_total 语义 == 预期样本数
         "n_valid": n_valid,
         "n_missing": n_missing,
+        "n_unobservable": n_unobservable,
+        "n_insufficient": n_insufficient,
         "value_type": value_type,
         "measurement_type": fvs[0].measurement_type,
         "confidence": confidence,
@@ -305,7 +340,11 @@ class Aggregator:
         for p in profiles:
             for fid, fv in p.feature_values.items():
                 by_feature.setdefault(fid, []).append(fv)
-        return {fid: aggregate_feature_values(fvs) for fid, fvs in by_feature.items()}
+        # n_expected = 该层 chunk 数：每个特征预期在每个 chunk 上产出（task item 7）。
+        # 未来 LLM 标定可按 sample manifest 传入更精确的 expected 集合，不在此伪造。
+        n_expected = len(profiles)
+        return {fid: aggregate_feature_values(fvs, n_expected=n_expected)
+                for fid, fvs in by_feature.items()}
 
     @staticmethod
     def _count_strategy_evidence(profiles: list[ChunkProfile]) -> dict[str, int]:

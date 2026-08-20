@@ -12,7 +12,8 @@ from ..providers.llm_provider import LLMProvider, cache_key
 from ..schema.narrative_schema import (
     DETAIL_DIMENSIONS, FOCALIZATION_VALUES, INFORMATION_ACCESS_VALUES,
     PACE_DIMENSIONS, POV_VALUES, PRESENCE_VALUES, STABILITY_VALUES,
-    TEMPORAL_ORDER_VALUES, DISTANCE_VALUES, NarrativeObservation, validate_narrative,
+    TEMPORAL_ORDER_VALUES, DISTANCE_VALUES, UNKNOWN_VALUES,
+    NarrativeObservation, validate_narrative,
 )
 from ..schema.versions import NARRATIVE_ANALYZER_VERSION, NARRATIVE_SCHEMA_VERSION
 from .base import AnalysisUnavailable, parse_json_response
@@ -20,6 +21,17 @@ from .evidence import verify_evidence_quotes
 
 ANALYZER_ID = "NarrativeAnalyzer"
 ANALYZER_VERSION = NARRATIVE_ANALYZER_VERSION
+
+# 高置信阈值：conf 达到该值即视为"高置信实质判断"，须至少一条已验证证据（task item 3）
+_HIGH_CONFIDENCE = 0.9
+# 实质判断字段：任一字段给出非 unknown 的实际取值，即视为做出了实质叙事判断
+_SUBSTANTIVE_FIELDS = ("pov", "focalization", "narrative_distance",
+                       "narrator_presence", "information_access", "temporal_order")
+
+
+def _is_substantive(obs: NarrativeObservation) -> bool:
+    """实质判断：至少一个实质字段给出了非 unknown 的实际取值。"""
+    return any(getattr(obs, f) not in UNKNOWN_VALUES for f in _SUBSTANTIVE_FIELDS)
 
 
 def _build_system_prompt() -> str:
@@ -78,4 +90,11 @@ class NarrativeAnalyzer:
         check = verify_evidence_quotes(obs.observed_evidence, text)
         obs.observed_evidence = [e for e in check.verified if isinstance(e, str)]
         obs.unverified_evidence = [e for e in check.unverified if isinstance(e, str)]
+        # 证据充分性（task item 3）：高置信实质判断却无已验证证据 → 确定性降级，
+        # 绝不静默保留 confidence 0.9+ 且零证据的结果。
+        if (obs.confidence >= _HIGH_CONFIDENCE and not obs.observed_evidence
+                and _is_substantive(obs)):
+            obs.confidence = 0.0
+            obs.evidence_issues.append(
+                "high_confidence_substantive_without_verified_evidence")
         return obs

@@ -57,10 +57,13 @@ class StrategyRegistry:
 
     @staticmethod
     def _evidence_status(s: CreativeStrategy) -> str:
-        chunks = {e.chunk_id for e in s.evidence}
-        works = {e.work_id for e in s.evidence}
-        # 仅统计非空 author（task item 7）：空 author 不构成"同一作者"的跨作品证据
-        authors = {e.author_id for e in s.evidence if e.author_id}
+        # 严格作者一致性（task item 5）：仅统计 author_id 与 work_id 均非空的证据；
+        # 缺失 author/work 元数据的证据绝不参与作者级验证。
+        counted = [e for e in s.evidence if e.author_id and e.work_id]
+        works = {e.work_id for e in counted}
+        authors = {e.author_id for e in counted}
+        chunks = {e.chunk_id for e in s.evidence if e.chunk_id}
+        # VALIDATED：>= 2 个不同 work，且所有可计证据来自**同一位**作者
         if len(works) >= 2 and len(authors) == 1:
             return StrategyStatus.VALIDATED.value
         if len(chunks) >= 2:

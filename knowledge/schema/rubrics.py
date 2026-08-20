@@ -6,11 +6,14 @@ float"。这里定义两种协议族（task item 1）：
 
     frequency
         LLM 只负责识别证据实例（span/event）；程序对**已验证**的实例做确定性
-        计数（或折算成率），最终 value 由证据推导，而非一个不透明的浮点。
+        计数，并归一化为每 1000 词（token）的实例率。最终 value = raw_count /
+        exposure_tokens × 1000，由证据推导，而非一个不透明的浮点（task item 1）。
 
     ordinal
         有锚定、有界的序数/程度量表，每一档都有显式定义（如 0=absent … 4=dominant）。
-        LLM 返回档位 + 证据，程序校验档位是否落在量表内。
+        LLM 返回评估状态（observed / insufficient_evidence / not_observable）+ 档位
+        + 证据；当状态非 observed 时档位必须为 null，程序绝不把"无法评估"折算成 0
+        （task item 2）。
 
 每个 rubric 带 protocol_version，使测量结果可追溯（与 analyzer/schema 版本
 并列，见 spec §17.6 的版本分离原则）。
@@ -26,6 +29,18 @@ from .versions import SCHEMA_VERSION
 
 FREQUENCY_PROTOCOL = "frequency"
 ORDINAL_PROTOCOL = "ordinal"
+
+# frequency 特征的 value 单位：程序归一化为每 1000 词（token）的实例率。
+# LLM 只负责识别实例，绝不参与归一化（task item 1）。
+FREQUENCY_UNIT = "instances per 1000 tokens"
+FREQUENCY_DENOMINATOR = 1000
+
+# ordinal 特征的评估状态（task item 2）：显式区分"观察到缺失"与"无法评估"。
+ASSESSMENT_OBSERVED = "observed"
+ASSESSMENT_INSUFFICIENT = "insufficient_evidence"
+ASSESSMENT_NOT_OBSERVABLE = "not_observable"
+ASSESSMENT_STATUSES = (ASSESSMENT_OBSERVED, ASSESSMENT_INSUFFICIENT,
+                       ASSESSMENT_NOT_OBSERVABLE)
 
 # 通用锚定序数档（task item 1.B 的示例量表）
 DEFAULT_ORDINAL_LEVELS: tuple["ScaleLevel", ...] = ()
@@ -78,17 +93,25 @@ _ABSENT_WEAK_MODERATE_STRONG_DOMINANT = _levels([
 ])
 
 # 强度/程度类可复用 "absent … dominant"，但语义需按特征定制描述文本
+# 关键契约（task item 2）：显式区分"观察到缺失"（level 0）与"无法评估"
+# （assessment_status != observed → level 必须为 null，程序不折算成 0）。
 _INTENSITY_INSTRUCTION = (
     "Measure the DEGREE of {desc} in the passage on an anchored ordinal scale. "
-    "Return the integer `level` in {{0,1,2,3,4}} using these definitions:\n"
-    "  0 = absent: {desc_absent}\n"
-    "  1 = weak: a faint or occasional trace of {desc}\n"
-    "  2 = moderate: {desc} is clearly present but not dominant\n"
-    "  3 = strong: {desc} is pronounced and recurrent\n"
-    "  4 = dominant: {desc} dominates the passage\n"
-    "Do NOT emit a non-numeric label for this scale. If the property cannot be "
-    "assessed from the passage, return level 0 (absent) with low confidence and "
-    "an empty evidence list."
+    "Return an `assessment_status` in {{observed, insufficient_evidence, "
+    "not_observable}} plus an integer `level`:\n"
+    "  observed: you can assess the degree from the passage. Then `level` is an "
+    "integer in {{0,1,2,3,4}} with these definitions:\n"
+    "    0 = absent: {desc_absent}\n"
+    "    1 = weak: a faint or occasional trace of {desc}\n"
+    "    2 = moderate: {desc} is clearly present but not dominant\n"
+    "    3 = strong: {desc} is pronounced and recurrent\n"
+    "    4 = dominant: {desc} dominates the passage\n"
+    "  insufficient_evidence: the passage does not give enough text to assess it. "
+    "Then `level` must be null and `evidence` an empty array.\n"
+    "  not_observable: the property is not observable in this kind of passage. "
+    "Then `level` must be null and `evidence` an empty array.\n"
+    "Do NOT emit a non-numeric label for this scale, and do NOT return level 0 "
+    "to mean 'cannot assess' — level 0 means observed absence only."
 )
 
 _FREQUENCY_INSTRUCTION = (
@@ -96,7 +119,8 @@ _FREQUENCY_INSTRUCTION = (
     "`instances`; each element is an object with:\n"
     '  "evidence": a SHORT VERBATIM quote from the passage containing the instance,\n'
     '  "label": a brief label of the instance.\n'
-    "Do NOT return a number — the program will count your validated instances. "
+    "Do NOT return a number — the program will count your validated instances "
+    "and normalize to a rate per 1000 tokens. "
     "If there are no instances, return an empty list."
 )
 
@@ -139,16 +163,16 @@ def build_default_rubrics() -> RubricRegistry:
     """V0.1 LLM 特征的默认测量协议（frequency 与 ordinal 两类）。"""
     reg = RubricRegistry()
 
-    # —— frequency-like（程序对已验证实例计数/折算）——
+    # —— frequency-like（程序对已验证实例计数，并归一化为每 1000 词的率）——
     reg.register(_rubric("metaphor_frequency", FREQUENCY_PROTOCOL,
                          _FREQUENCY_INSTRUCTION.format(desc="metaphor"),
-                         unit="instances", min_evidence=1))
+                         unit=FREQUENCY_UNIT, min_evidence=1))
     reg.register(_rubric("simile_frequency", FREQUENCY_PROTOCOL,
                          _FREQUENCY_INSTRUCTION.format(desc="simile"),
-                         unit="instances", min_evidence=1))
+                         unit=FREQUENCY_UNIT, min_evidence=1))
     reg.register(_rubric("irony_frequency", FREQUENCY_PROTOCOL,
                          _FREQUENCY_INSTRUCTION.format(desc="ironic statement or event"),
-                         unit="instances", min_evidence=1))
+                         unit=FREQUENCY_UNIT, min_evidence=1))
 
     # —— intensity / degree-like（锚定序数 0–4）——
     reg.register(_rubric("irony_intensity", ORDINAL_PROTOCOL,

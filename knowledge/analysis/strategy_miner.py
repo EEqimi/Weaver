@@ -8,10 +8,11 @@
 经多 chunk / 跨作品证据逐步晋升（见 strategies/registry.py 生命周期）。
 默认盲测、无 provider 时返回 AnalysisUnavailable。
 
-标定就绪（task item 5/7）：
+标定就绪（task item 5/6/7）：
     - 所有 evidence 经共享校验逐字比对 passage，未验证引文显式标记；
     - 保留 match confidence 与全部**有效**引文（不丢弃置信度、不只留第一条）；
-    - 高置信正向判定必须附带有效证据，否则拒绝（不静默接受编造引文）；
+    - 零验证证据的正向匹配/发现绝不构成生命周期证据（无论置信度高低），
+      不静默接受编造引文（task item 6）；
     - StrategyEvidence 携带 analyzer/schema 溯源。
 """
 from __future__ import annotations
@@ -31,8 +32,7 @@ from .evidence import verify_evidence_quotes
 ANALYZER_ID = "StrategyMiner"
 ANALYZER_VERSION = STRATEGY_MINER_VERSION
 
-# 高置信阈值：conf 达到该值即视为"高置信"，正向判定须满足最小已验证证据数
-_CONFIDENT_THRESHOLD = 0.6
+# 正向判定所需的最小已验证证据数（task item 6：零验证证据绝不构成生命周期证据）
 _MIN_EVIDENCE = 1
 
 
@@ -85,8 +85,8 @@ class StrategyMiner:
             raw_quotes = [q for q in (m.get("evidence") or []) if isinstance(q, str)]
             check = verify_evidence_quotes(raw_quotes, text)
             confidence = self._confidence(m)
-            # 高置信正向判定却无有效证据 → 拒绝（不静默接受编造引文）
-            if self._confident_positive(confidence) and check.n_verified < _MIN_EVIDENCE:
+            # 零验证证据的正向匹配不构成生命周期证据（task item 6），无论置信度高低
+            if check.n_verified < _MIN_EVIDENCE:
                 continue
             verified = [q for q in check.verified if isinstance(q, str)]
             unverified = [q for q in check.unverified if isinstance(q, str)]
@@ -157,8 +157,8 @@ class StrategyMiner:
         evidence = [e for e in evidence if isinstance(e, str)]
         check = verify_evidence_quotes(evidence, text)
         confidence = self._confidence(it)
-        # 高置信正向判定却无有效证据 → 拒绝发现该策略
-        if self._confident_positive(confidence) and check.n_verified < _MIN_EVIDENCE:
+        # 零验证证据的正向发现不构成生命周期证据（task item 6），无论置信度高低
+        if check.n_verified < _MIN_EVIDENCE:
             return None
         verified = [e for e in check.verified if isinstance(e, str)]
         return CreativeStrategy(
@@ -191,10 +191,6 @@ class StrategyMiner:
         if not 0.0 <= c <= 1.0:
             return None
         return c
-
-    @staticmethod
-    def _confident_positive(confidence: float | None) -> bool:
-        return confidence is not None and confidence >= _CONFIDENT_THRESHOLD
 
     @staticmethod
     def _slugify(name: str) -> str:

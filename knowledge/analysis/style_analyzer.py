@@ -25,12 +25,14 @@ from __future__ import annotations
 from ..providers.llm_provider import LLMProvider, cache_key
 from ..schema.feature_registry import FeatureDefinition
 from ..schema.rubrics import (
+    ASSESSMENT_OBSERVED, ASSESSMENT_STATUSES, FREQUENCY_DENOMINATOR, FREQUENCY_UNIT,
     MeasurementRubric, RubricRegistry, build_default_rubrics,
 )
 from ..schema.style_schema import FeatureValue
 from ..schema.versions import FEATURE_SCHEMA_VERSION, LLM_ANALYZER_VERSION
 from .base import AnalysisUnavailable, LLMResponseError, parse_json_response
 from .evidence import verify_evidence_quotes
+from .text_utils import tokens
 
 ANALYZER_ID = "LlmFeatureAnalyzer"
 ANALYZER_VERSION = LLM_ANALYZER_VERSION
@@ -58,8 +60,12 @@ _SYSTEM_PROMPT_HEAD = (
 
 def _ordinal_schema_description(rubric: MeasurementRubric) -> str:
     levels = ", ".join(f"{l.value}={l.label}" for l in rubric.levels)
+    statuses = ", ".join(ASSESSMENT_STATUSES)
     return (
-        f'  "level": an integer in {{{levels}}} (the anchored scale value),\n'
+        f'  "assessment_status": one of {{{statuses}}} (observed / insufficient_evidence '
+        f'/ not_observable),\n'
+        f'  "level": when assessment_status is "observed", an integer in {{{levels}}} '
+        f'(the anchored scale value); otherwise null,\n'
         f'  "evidence": an array of 1-5 SHORT VERBATIM quotes from the passage that '
         f'support the assigned level,\n'
     )
@@ -158,16 +164,22 @@ class LLMFeatureAnalyzer:
             raise LLMResponseError(
                 f"frequency 特征 {feature.id} 的响应缺少 instances 列表")
         check = verify_evidence_quotes(instances, text)
-        value = float(len(check.verified))
         # "正向判定" = 模型声称存在实例（len(instances) > 0），而非已验证计数：
         # 声称有实例却全部无法逐字验证 → 高置信正向判定缺证据，拒绝。
         self._enforce_evidence_count(feature, rubric, confidence, len(instances) > 0,
                                      check.n_verified)
         evidence = [self._quote_text(e) for e in check.verified]
+
+        # 真实频率归一化（task item 1）：value = 已验证实例数 / 词数 × 1000。
+        # 分母用项目统一 tokenizer（text_utils.tokens），绝不使用 LLM 输出归一化。
+        raw_count = check.n_verified
+        exposure = len(tokens(text))
+        value = (raw_count * float(FREQUENCY_DENOMINATOR) / exposure) if exposure > 0 else 0.0
+
         return FeatureValue(
             feature_id=feature.id,
             value=value,
-            raw_value=value,
+            raw_value=float(raw_count),
             normalized_value=None,
             value_type=feature.value_type.value,
             measurement_type=feature.measurement_type.value,
@@ -181,6 +193,9 @@ class LLMFeatureAnalyzer:
             provenance={
                 "chunk_id": chunk_id,
                 "reasoning_summary": reasoning,
+                "raw_count": raw_count,
+                "exposure_tokens": exposure,
+                "unit": FREQUENCY_UNIT,
                 "n_instances_identified": len(instances),
                 "n_instances_verified": check.n_verified,
                 "n_instances_unverified": check.n_unverified,
@@ -191,6 +206,40 @@ class LLMFeatureAnalyzer:
 
     def _to_ordinal_value(self, feature, rubric, chunk_id, text, data,
                           confidence, reasoning) -> FeatureValue:
+        # 评估状态（task item 2）：显式区分"观察到"与"无法评估"，绝不把后者折算成 0。
+        status = data.get("assessment_status", ASSESSMENT_OBSERVED)
+        if status not in ASSESSMENT_STATUSES:
+            raise LLMResponseError(
+                f"ordinal 特征 {feature.id} 的 assessment_status={status!r} 非法")
+
+        if status != ASSESSMENT_OBSERVED:
+            # 无法评估：value / raw_value 置 None，保留状态，绝不折算成 0。
+            level = data.get("level")
+            if level is not None:
+                raise LLMResponseError(
+                    f"ordinal 特征 {feature.id} 状态 {status} 时 level 必须为 null，"
+                    f"实际 {level!r}")
+            return FeatureValue(
+                feature_id=feature.id,
+                value=None,
+                raw_value=None,
+                normalized_value=None,
+                value_type=feature.value_type.value,
+                measurement_type=feature.measurement_type.value,
+                confidence=confidence,
+                evidence=[],
+                sample_count=1,
+                variance=None,
+                analyzer_id=ANALYZER_ID,
+                analyzer_version=ANALYZER_VERSION,
+                schema_version=FEATURE_SCHEMA_VERSION,
+                provenance={
+                    "chunk_id": chunk_id,
+                    "reasoning_summary": reasoning,
+                    "assessment_status": status,
+                },
+            )
+
         if "level" not in data:
             raise LLMResponseError(
                 f"ordinal 特征 {feature.id} 的响应缺少 level")
@@ -230,6 +279,7 @@ class LLMFeatureAnalyzer:
             provenance={
                 "chunk_id": chunk_id,
                 "reasoning_summary": reasoning,
+                "assessment_status": status,
                 "level_label": level_label,
                 "unverified_evidence": [self._quote_text(e) for e in check.unverified],
             },

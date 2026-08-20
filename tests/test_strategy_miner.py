@@ -36,13 +36,26 @@ def test_match_ignores_unknown_strategy():
     assert [sid for sid, _ in out] == ["dramatic_irony"]
 
 
-def test_match_rejects_confident_positive_without_verified_evidence():
-    # task item 7：高置信正向判定却无逐字可验证证据 → 拒绝，不静默接受编造引文
+def test_match_rejects_zero_verified_evidence_regardless_of_confidence():
+    # task item 6：零验证证据的正向匹配绝不构成生命周期证据，无论置信度高低
     resp = json.dumps({"matches": [
         {"strategy_id": "dramatic_irony",
-         "evidence": ["fabricated quote"], "confidence": 0.9}]})
+         "evidence": ["fabricated quote"], "confidence": 0.9},
+        {"strategy_id": "free_indirect_discourse",
+         "evidence": ["another fabricated quote"], "confidence": 0.2}]})
     miner = StrategyMiner(DummyLLMProvider(response=resp), seed_default_registry())
     out = miner.match(PASSAGE)
+    assert out == []
+
+
+def test_discover_rejects_zero_verified_evidence():
+    # task item 6：零验证证据的候选发现也不得产出
+    resp = json.dumps({"strategies": [
+        {"name": "Fabricated Strategy", "description": "d",
+         "triggers": ["t"], "operations": ["o"], "intended_effects": ["e"],
+         "evidence": ["not in the passage"], "confidence": 0.3}]})
+    miner = StrategyMiner(DummyLLMProvider(response=resp), seed_default_registry())
+    out = miner.discover(PASSAGE)
     assert out == []
 
 

@@ -98,6 +98,8 @@ class NarrativeObservation:
 
     # 比例字段的校验问题（键/数值/归一化），供 QC 与追溯
     proportion_issues: list[str] = field(default_factory=list)
+    # 证据充分性（task item 3）：高置信实质判断却无已验证证据时显式标记
+    evidence_issues: list[str] = field(default_factory=list)
 
     confidence: float = 0.0
 
@@ -122,6 +124,7 @@ class NarrativeObservation:
             "unverified_evidence": self.unverified_evidence,
             "interpretation": self.interpretation,
             "proportion_issues": self.proportion_issues,
+            "evidence_issues": self.evidence_issues,
             "confidence": self.confidence,
         }
 
@@ -131,7 +134,8 @@ def _validate_proportions(name: str, data: Any,
     """校验比例字段：数值、范围、键、近似归一化；返回 (干净 dict, 问题列表)。
 
     - 未知键：显式记录（不静默丢弃）；
-    - 非数值 / 负值：抛 ValueError（malformed）；
+    - 非数值 / 负值 / > 1：抛 ValueError（malformed，task item 4）；
+    - 非空但全零：显式标记 insufficient（不伪装成有效分布）；
     - 比例之和偏离 1（超过容差）：记录问题，保留原值（不伪造归一化）。
     """
     if data is None:
@@ -148,10 +152,14 @@ def _validate_proportions(name: str, data: Any,
             raise ValueError(f"narrative.{name}.{k} 必须是数值: {v!r}")
         if v < 0:
             raise ValueError(f"narrative.{name}.{k} 必须 >= 0: {v!r}")
+        if v > 1:
+            raise ValueError(f"narrative.{name}.{k} 必须 <= 1: {v!r}")
         clean[k] = float(v)
     if clean:
         s = sum(clean.values())
-        if s > 0 and not math.isclose(s, 1.0, abs_tol=_PROPORTION_TOLERANCE):
+        if s == 0.0:
+            issues.append(f"{name} 为非空但全零分布（显式 insufficient）")
+        elif not math.isclose(s, 1.0, abs_tol=_PROPORTION_TOLERANCE):
             issues.append(f"{name} 比例之和 {s:.3f} 偏离 1（容差 {_PROPORTION_TOLERANCE}）")
     return clean, issues
 

@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 3–4.1 (calibration readiness fix) — COMPLETE, review pending |
-| **Last completed checkpoint** | Phase 3–4.1 calibration-readiness fix (leak-free CV, measurement rubrics, evidence verification, aggregation provenance) |
+| **Current phase** | Phase 3–4.2 (LLM calibration contract fix) — COMPLETE, review pending |
+| **Last completed checkpoint** | Phase 3–4.2 LLM calibration contract fix (frequency rate normalization, ordinal assessment_status, narrative evidence/proportion contracts, strict strategy author consistency, expected-sample accounting) |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -20,6 +20,9 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - Deterministic stratified sampling manifest (`seq`-ordered).
 - Measurement rubrics: frequency vs ordinal protocols for all LLM-derived features.
 - Shared evidence verification (NFC + punctuation normalization + substring match).
+- Frequency features normalize programmatically to a rate per 1000 tokens (`raw_count`/`exposure` in provenance); ordinal features carry `assessment_status` (`observed`/`insufficient_evidence`/`not_observable`) with null values preserved.
+- Narrative proportion validation (bounds/all-zero/unknown-key) and evidence-sufficiency downgrade.
+- Strict strategy author/work consistency and zero-verified-evidence rejection.
 
 ## What is partially implemented
 - Layer A judgment/hybrid, Layer B (narrative), Layer C (strategies) analyzers are **written but not run** — they need a configured LLM and the calibration sample.
@@ -37,9 +40,10 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
-- **97 tests passed** (was 85). New regression tests cover measurement rubrics,
-  frequency-vs-ordinal LLM contracts, evidence verification, calibration `seq`
-  ordering, aggregation uncertainty/evidence preservation, and leak-free CV.
+- **114 tests passed** (was 97). New regression tests cover frequency rate
+  normalization, ordinal assessment status, narrative evidence/proportion
+  contracts, strict strategy author/work consistency, zero-verified-evidence
+  rejection, and aggregation expected-sample accounting.
 
 ## Latest experiment results (deterministic, no LLM)
 - Layer A: 2,328 TRAIN chunks × 22 features.
@@ -52,8 +56,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
   held-out excluded.
 
 ## Current blockers / review items
-- **Awaiting review** of the Phase 3–4.1 calibration-readiness checkpoint before
-  any LLM spend. `candidate_core` features must remain un-promoted.
+- **Awaiting review** of the Phase 3–4.2 LLM calibration contract checkpoint
+  before any LLM spend. `candidate_core` features must remain un-promoted.
 
 ## Next planned action
 - On approval: run the sampled LLM calibration (Layer A judgment/hybrid, B, C on

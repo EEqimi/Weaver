@@ -62,7 +62,10 @@ def test_aggregate_feature_values_distribution_dispatch():
 
 
 def test_aggregate_feature_values_empty():
-    assert aggregate_feature_values([]) == {"n": 0}
+    assert aggregate_feature_values([]) == {
+        "n": 0, "n_expected": 0, "n_total": 0, "n_valid": 0, "n_missing": 0,
+        "n_unobservable": 0, "n_insufficient": 0,
+    }
 
 
 def test_aggregate_feature_values_preserves_missing_confidence_evidence():
@@ -88,6 +91,29 @@ def test_aggregate_feature_values_preserves_missing_confidence_evidence():
     assert s["analyzer_ids"] == ["X"]
     assert s["analyzer_versions"] == ["1.0"]
     assert s["provenance"] == [{"chunk_id": "c2"}]
+
+
+def test_aggregate_feature_values_expected_sample_accounting():
+    # task item 7：n_expected 表示预期接受分析的 chunk 数；缺失/不可观察/不充分
+    # 分别计数，且不可观察值绝不拉低数值均值。
+    fvs = [
+        _fv("a", 1.0, "discrete"),
+        FeatureValue(feature_id="a", value=None, raw_value=None,
+                     value_type="discrete", measurement_type="judgment",
+                     provenance={"assessment_status": "not_observable"}),
+        FeatureValue(feature_id="a", value=None, raw_value=None,
+                     value_type="discrete", measurement_type="judgment",
+                     provenance={"assessment_status": "insufficient_evidence"}),
+        _fv("a", 3.0, "discrete"),
+    ]
+    s = aggregate_feature_values(fvs, n_expected=5)  # 5 预期，1 个 chunk 无 FeatureValue
+    assert s["n_expected"] == 5
+    assert s["n_total"] == 5
+    assert s["n_valid"] == 2
+    assert s["n_unobservable"] == 1
+    assert s["n_insufficient"] == 1
+    assert s["n_missing"] == 1           # 5 - 2 - 1 - 1
+    assert s["mean"] == 2.0              # 不可观察/不充分不拉低均值
 
 
 # ---- narrative 聚合 ----
@@ -160,6 +186,27 @@ def test_strategy_single_chunk_stays_discovered():
                                   status=StrategyStatus.DISCOVERED.value))
     reg.record_evidence("s", StrategyEvidence("c1", "w1", "austen"))
     assert reg.get("s").status == StrategyStatus.DISCOVERED.value
+
+
+def test_strategy_validation_requires_consistent_non_empty_author():
+    # task item 5：一条 Austen 证据 + 一条空 author 证据跨两作品 → 不得 validated
+    reg = seed_default_registry()
+    sid = "free_indirect_discourse"
+    reg.record_evidence(sid, StrategyEvidence("c1", "w1", "austen"))
+    reg.record_evidence(sid, StrategyEvidence("c2", "w2", ""))  # 空 author
+    assert reg.get(sid).status == StrategyStatus.CANDIDATE.value
+    # 空 work_id 同样不得参与作者级验证
+    reg.record_evidence(sid, StrategyEvidence("c3", "", "austen"))
+    assert reg.get(sid).status == StrategyStatus.CANDIDATE.value
+
+
+def test_strategy_validation_requires_two_distinct_works():
+    # task item 5：>= 2 个不同 work 才可 validated；同 work 多 chunk 仅 candidate
+    reg = seed_default_registry()
+    sid = "free_indirect_discourse"
+    reg.record_evidence(sid, StrategyEvidence("c1", "w1", "austen"))
+    reg.record_evidence(sid, StrategyEvidence("c2", "w1", "austen"))
+    assert reg.get(sid).status == StrategyStatus.CANDIDATE.value
 
 
 def test_seed_registry_has_four_candidates():

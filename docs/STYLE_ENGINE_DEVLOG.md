@@ -344,6 +344,72 @@ the sampled LLM run. Ten items addressed:
 
 ---
 
+## Current Checkpoint — Phase 3–4.2 LLM Calibration Contract Fix
+
+**Status:** COMPLETE — REVIEW PENDING. **STOPPED before the first sampled LLM
+calibration.** Do not launch the 40-chunk LLM calibration or begin Phase 5 until
+reviewed. Do not merge or open a PR.
+
+Focused contract fix tightening the LLM calibration semantics so that a future
+sampled run cannot silently normalize away real signal, fabricate absence as
+zero, or count unverified claims as evidence. Eight items addressed:
+
+1. **True frequency normalization** — `metaphor_frequency`, `simile_frequency`,
+   `irony_frequency` now store `raw_count` (verified instance count) and
+   `exposure` (token count via the deterministic project tokenizer
+   `text_utils.tokens`); `value = raw_count / exposure × 1000` (instances per
+   1000 tokens). The program — never LLM output — performs normalization.
+   `raw_count` / `exposure_tokens` / `unit` are preserved in provenance, and the
+   unit (`instances per 1000 tokens`) is documented in the rubric.
+2. **Distinguish absence from not-observable for ordinal features** — added
+   `assessment_status ∈ {observed, insufficient_evidence, not_observable}`.
+   When status ≠ observed, `level` must be null and `FeatureValue` preserves the
+   state with `value = None` (never coerced to zero); level `0` means an actually
+   observed absence only. Applied to `irony_intensity`,
+   `narrator_evaluative_intervention`, `psychological_representation`,
+   `emotional_restraint`, `emotional_intensity`. Aggregation counts unobservable/
+   insufficient samples without pulling their means toward zero.
+3. **Narrative evidence contract** — high-confidence (≥0.9) substantive
+   narrative judgments must carry ≥1 verified evidence quote; otherwise the
+   observation is deterministically downgraded to `confidence = 0.0` and tagged
+   `high_confidence_substantive_without_verified_evidence` (never silently
+   retaining 0.9+ with no verified evidence).
+4. **Narrative proportion validation** — `temporal_pace` / `scene_detail`: every
+   value ∈ [0,1]; non-empty distribution sums ≈1; all-zero non-empty is invalid/
+   insufficient; unknown keys are reported (never silently renormalized or
+   dropped). Regression tests cover value>1, negative, all-zero, sum≪1, and valid
+   approximate.
+5. **Strict strategy author consistency** — VALIDATED requires every counted
+   evidence to have non-empty `author_id` **and** non-empty `work_id`, all counted
+   author ids identical, and ≥2 distinct works. Missing author/work metadata no
+   longer contributes to author-level validation. Regression test: one Austen +
+   one empty-author across two works must **not** validate.
+6. **Strategy evidence sufficiency** — a positive match/discovery with zero
+   verified evidence never counts as lifecycle evidence regardless of confidence.
+7. **Aggregation expected-sample accounting** — `n_total = n_expected` (chunks
+   expected to receive feature analysis); preserved fields `n_expected`,
+   `n_valid`, `n_missing`, `n_unobservable`, `n_insufficient`. Missing
+   `FeatureValue`s are never fabricated.
+8. **Tests + docs** — regression tests for all of the above; this entry + STATUS
+   update.
+
+### Version bumps (schema/analyzer/aggregation — analyzer_version stays separate
+### from schema_version per spec §17.6)
+- `NARRATIVE_SCHEMA_VERSION`, `LLM_ANALYZER_VERSION`, `NARRATIVE_ANALYZER_VERSION`,
+  `STRATEGY_MINER_VERSION`, `AGGREGATION_VERSION` → `0.2.0`.
+
+### Tests
+- **114 tests passed** (was 97). New regression tests cover: frequency rate
+  normalization (raw_count/exposure/unit), ordinal assessment status
+  (observed/insufficient/not_observable + null-level contract + invalid status),
+  narrative high-confidence downgrade/keep, narrative proportion bounds/all-zero/
+  unknown-key, strict strategy author/work consistency, zero-verified-evidence
+  rejection, and aggregation expected-sample accounting.
+
+### No real LLM calls launched.
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git
