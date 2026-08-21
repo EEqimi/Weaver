@@ -92,3 +92,52 @@ def test_miner_unavailable_without_provider():
     miner = StrategyMiner(UnconfiguredLLMProvider(), seed_default_registry())
     assert isinstance(miner.match(PASSAGE), AnalysisUnavailable)
     assert isinstance(miner.discover(PASSAGE), AnalysisUnavailable)
+
+
+# ---- 拒绝收集器（供冒烟/标定报表统计被拒输出）----
+def test_match_records_zero_evidence_rejection():
+    resp = json.dumps({"matches": [
+        {"strategy_id": "dramatic_irony",
+         "evidence": ["fabricated quote"], "confidence": 0.9}]})
+    rejections: list[dict] = []
+    miner = StrategyMiner(DummyLLMProvider(response=resp), seed_default_registry(),
+                          rejections=rejections)
+    out = miner.match(PASSAGE)
+    assert out == []
+    assert rejections == [{"stage": "match", "reason": "zero_verified_evidence",
+                           "strategy_id": "dramatic_irony", "confidence": 0.9}]
+
+
+def test_match_records_unknown_strategy_rejection():
+    resp = json.dumps({"matches": [
+        {"strategy_id": "made_up_strategy", "evidence": ["x"], "confidence": 0.5}]})
+    rejections: list[dict] = []
+    miner = StrategyMiner(DummyLLMProvider(response=resp), seed_default_registry(),
+                          rejections=rejections)
+    assert miner.match(PASSAGE) == []
+    assert rejections == [{"stage": "match", "reason": "unknown_strategy",
+                           "strategy_id": "made_up_strategy"}]
+
+
+def test_discover_records_zero_evidence_rejection():
+    resp = json.dumps({"strategies": [
+        {"name": "Fabricated Strategy", "description": "d",
+         "triggers": ["t"], "operations": ["o"], "intended_effects": ["e"],
+         "evidence": ["not in the passage"], "confidence": 0.6}]})
+    rejections: list[dict] = []
+    miner = StrategyMiner(DummyLLMProvider(response=resp), seed_default_registry(),
+                          rejections=rejections)
+    assert miner.discover(PASSAGE) == []
+    assert len(rejections) == 1
+    assert rejections[0]["stage"] == "discover"
+    assert rejections[0]["reason"] == "zero_verified_evidence"
+    assert rejections[0]["name"] == "Fabricated Strategy"
+
+
+def test_no_rejection_collector_is_noop():
+    # 默认 rejections=None：行为与无收集器一致，绝不抛异常
+    resp = json.dumps({"matches": [
+        {"strategy_id": "dramatic_irony",
+         "evidence": ["fabricated"], "confidence": 0.9}]})
+    miner = StrategyMiner(DummyLLMProvider(response=resp), seed_default_registry())
+    assert miner.match(PASSAGE) == []

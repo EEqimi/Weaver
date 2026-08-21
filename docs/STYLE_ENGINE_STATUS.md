@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 3–4.2 (LLM calibration contract fix) — COMPLETE, review pending |
-| **Last completed checkpoint** | Phase 3–4.2 LLM calibration contract fix (frequency rate normalization, ordinal assessment_status, narrative evidence/proportion contracts, strict strategy author consistency, expected-sample accounting) |
+| **Current phase** | Phase 4.3 (LLM smoke calibration, 4 chunks) — COMPLETE |
+| **Last completed checkpoint** | Phase 4.3 LLM smoke calibration: real `qwen-plus` backend end-to-end on 4 chunks (Layer A/B/C), 132 tests, 37/44 success — 7 failures are DashScope `Arrearage` (billing), not code |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -16,6 +16,10 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - Layer A deterministic analyzer: 22 features.
 - Layer D stylometry: extraction + Burrows Delta + PCA + clustering + SVM/logreg validation (GroupKFold, held-out), leak-free grouped CV (per-fold vectorizer refit), function-word/word-unigram overlap audit.
 - LLM provider abstraction (cacheable, unconfigured-safe).
+- Real LLM backend: `OpenAICompatibleProvider` (DashScope compatible-mode, stdlib,
+  transport error body capture, runtime metering) + cache hit/miss counters.
+- Smoke calibration: `knowledge/calibration/smoke.py` (4-chunk end-to-end run with
+  JSON + Markdown report and rejection accounting).
 - Profile aggregation: `ChunkProfile → WorkProfile → AuthorProfile`, type-aware, preserving uncertainty/evidence/provenance.
 - Deterministic stratified sampling manifest (`seq`-ordered).
 - Measurement rubrics: frequency vs ordinal protocols for all LLM-derived features.
@@ -40,10 +44,10 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
-- **114 tests passed** (was 97). New regression tests cover frequency rate
-  normalization, ordinal assessment status, narrative evidence/proportion
-  contracts, strict strategy author/work consistency, zero-verified-evidence
-  rejection, and aggregation expected-sample accounting.
+- **132 tests passed** (was 114). New regression tests cover: OpenAICompatibleProvider
+  (configured/unconfigured, success+usage, 429 retry/backoff, permanent-4xx no-retry,
+  HTTP error-body capture), cache hit/miss counters, StrategyMiner rejection collector,
+  and smoke `_bump`/`_feature_report`.
 
 ## Latest experiment results (deterministic, no LLM)
 - Layer A: 2,328 TRAIN chunks × 22 features.
@@ -55,11 +59,22 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - Calibration sample: 40 chunks (4 × 10), `seq`-ordered deterministic stratified,
   held-out excluded.
 
+### LLM smoke calibration (real `qwen-plus`, 4 chunks)
+- 44 requests (11 × 4), 37 success, 0 schema/JSON failures, 0 retries.
+- 7 failures — all `HTTP 400 Arrearage` (DashScope overdue payment), on the last
+  chunk; account cut off mid-run. Environmental, not code.
+- Token usage 42,349 (33,220 in / 9,129 out); 6 strategy matches, 0 discoveries,
+  0 zero-evidence rejections, 0 narrative downgrades; 114 verified / 18 unverified
+  evidence quotes.
+- Artifacts: `data/analysis/calibration/{smoke_results.json, smoke_report.md}`.
+
 ## Current blockers / review items
-- **Awaiting review** of the Phase 3–4.2 LLM calibration contract checkpoint
-  before any LLM spend. `candidate_core` features must remain un-promoted.
+- **DashScope account in arrears (`Arrearage`)** — top up before the 40-chunk
+  calibration, or the run will be denied partway.
+- **Awaiting review** of the Phase 3–4.2 contract checkpoint before the full
+  sampled calibration. `candidate_core` features must remain un-promoted.
 
 ## Next planned action
-- On approval: run the sampled LLM calibration (Layer A judgment/hybrid, B, C on
-  the 40-chunk sample) with a configured, cache-backed provider; then aggregate
-  evidence and re-evaluate before Phase 5.
+- After topping up the account: run the sampled LLM calibration (Layer A
+  judgment/hybrid, B, C on the 40-chunk sample) with the configured, cache-backed
+  provider; then aggregate evidence and re-evaluate before Phase 5.

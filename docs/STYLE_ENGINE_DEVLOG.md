@@ -410,6 +410,65 @@ zero, or count unverified claims as evidence. Eight items addressed:
 
 ---
 
+## Checkpoint — Phase 4.3: LLM Smoke Calibration (4 chunks)
+
+**Status:** COMPLETE. Measurement-system validation only — **not** the 40-chunk
+calibration. Still stopped before the full sampled calibration (spec §13/§14).
+
+### Goal
+Before spending on the full 40-chunk calibration, validate the real LLM backend
+end-to-end on a deterministic 4-chunk sample (Layer A judgment/hybrid, B
+narrative, C strategy match+discover) and produce an inspectable per-chunk report.
+
+### Implementation
+- `knowledge/providers/llm_provider.py` — `OpenAICompatibleProvider` (stdlib
+  `urllib` DashScope compatible-mode backend, no third-party deps; key from env,
+  never logged/persisted), `LLMTransportError` (transport vs schema-failure
+  separation), `_error_detail` (reads HTTP error body), runtime metering
+  (`n_calls`/`n_success`/`n_retries`/`usage`); `CacheBackedLLMProvider` counts
+  `cache_hits`/`cache_misses`.
+- `knowledge/analysis/strategy_miner.py` — optional `rejections` collector
+  recording zero-verified-evidence and unknown-strategy rejections (default
+  `None` = unchanged behavior).
+- `knowledge/calibration/smoke.py` — `run_smoke_calibration()`: 4 chunks (one per
+  TRAIN work, position×dialogue diverse, held-out excluded), smoke-only strategy
+  registry (never writes back to the canonical registry), JSON + Markdown report.
+
+### Architecture decisions
+- Smoke is a **measurement-system check, not literary calibration**: no
+  Work/Author profile synthesis, no strategy lifecycle promotion, no
+  `candidate_core` promotion, no rubric/prompt edits driven by "literarily
+  surprising" results.
+- Blind analysis on (default), cache-backed, unconfigured-safe.
+
+### Experimental results (real LLM — `qwen-plus`)
+- 44 requests (11 × 4 chunks), **37 success**, 0 schema/JSON failures, 0 retries.
+- **7 failures — all `HTTP 400 Arrearage`** (DashScope account overdue payment),
+  on the last chunk; the account was cut off mid-run. Environmental, not code.
+- Token usage: 42,349 total (33,220 input / 9,129 output).
+- 6 strategy matches, 0 discoveries, 0 zero-evidence rejections, 0 narrative
+  downgrades; evidence accounting: 114 verified / 18 unverified.
+- Artifacts: `data/analysis/calibration/{smoke_results.json, smoke_report.md}`.
+
+### Issues discovered / Fixes
+- Provider dropped the HTTP error body → added `_error_detail`; an opaque
+  "400 Bad Request" became a readable "Arrearage / overdue payment". A cache-backed
+  re-run (37 hits) confirmed the 7 failures are deterministic billing denials.
+- Smoke metric accumulator would `KeyError` on unexpected error types → `_bump`
+  helper (safe dynamic-key increment).
+
+### Tests
+- **132 passed** (was 114). New tests: `OpenAICompatibleProvider` (configured/
+  unconfigured, success+usage, 429 retry/backoff, permanent-4xx no-retry, error
+  body capture), cache hit/miss counters, `StrategyMiner` rejection collector,
+  smoke `_bump`/`_feature_report`.
+
+### Blocker (next step)
+- **DashScope account is in arrears (`Arrearage`)** — top up before the 40-chunk
+  calibration, or the run will be denied partway.
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

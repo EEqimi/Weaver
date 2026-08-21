@@ -38,10 +38,17 @@ _MIN_EVIDENCE = 1
 
 class StrategyMiner:
     def __init__(self, provider: LLMProvider, registry: StrategyRegistry,
-                 blind: bool = True):
+                 blind: bool = True, rejections: list[dict] | None = None):
         self._provider = provider
         self._registry = registry
         self.blind = blind
+        # 可选拒绝收集器（供冒烟/标定报表统计"因零验证证据而被拒"的输出数）。
+        # 默认 None 时行为不变；传入 list 则每次拒绝追加一条 {stage, reason, ...}。
+        self._rejections = rejections
+
+    def _record_rejection(self, stage: str, reason: str, **fields) -> None:
+        if self._rejections is not None:
+            self._rejections.append({"stage": stage, "reason": reason, **fields})
 
     # ---- Mode 1：已知策略匹配 ----
     def match(self, text: str, chunk_id: str = "", work_id: str = "",
@@ -81,12 +88,15 @@ class StrategyMiner:
                 continue
             sid = m.get("strategy_id")
             if not self._registry.has(sid):
+                self._record_rejection("match", "unknown_strategy", strategy_id=sid)
                 continue  # 忽略模型杜撰的未知策略
             raw_quotes = [q for q in (m.get("evidence") or []) if isinstance(q, str)]
             check = verify_evidence_quotes(raw_quotes, text)
             confidence = self._confidence(m)
             # 零验证证据的正向匹配不构成生命周期证据（task item 6），无论置信度高低
             if check.n_verified < _MIN_EVIDENCE:
+                self._record_rejection("match", "zero_verified_evidence",
+                                       strategy_id=sid, confidence=confidence)
                 continue
             verified = [q for q in check.verified if isinstance(q, str)]
             unverified = [q for q in check.unverified if isinstance(q, str)]
@@ -159,6 +169,8 @@ class StrategyMiner:
         confidence = self._confidence(it)
         # 零验证证据的正向发现不构成生命周期证据（task item 6），无论置信度高低
         if check.n_verified < _MIN_EVIDENCE:
+            self._record_rejection("discover", "zero_verified_evidence",
+                                   name=name, confidence=confidence)
             return None
         verified = [e for e in check.verified if isinstance(e, str)]
         return CreativeStrategy(

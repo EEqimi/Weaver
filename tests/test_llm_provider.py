@@ -2,14 +2,19 @@
 """LLM 分析器与 provider 抽象测试（spec §12）：无 provider 显式不可用、
 schema 校验、malformed 响应报错、缓存键可复现。"""
 import json
+from unittest import mock
+from urllib.error import HTTPError
 
 import pytest
 
-from knowledge.analysis.base import AnalysisUnavailable, LLMResponseError, parse_json_response
+from knowledge.analysis.base import (
+    AnalysisUnavailable, LLMNotConfiguredError, LLMResponseError, parse_json_response,
+)
 from knowledge.analysis.narrative_analyzer import NarrativeAnalyzer
 from knowledge.analysis.style_analyzer import LLMFeatureAnalyzer
 from knowledge.providers.llm_provider import (
-    DummyLLMProvider, UnconfiguredLLMProvider, cache_key,
+    CacheBackedLLMProvider, DummyLLMProvider, LLMCache, LLMTransportError,
+    OpenAICompatibleProvider, UnconfiguredLLMProvider, cache_key,
 )
 from knowledge.schema.feature_registry import build_default_registry
 
@@ -248,3 +253,103 @@ def test_cache_key_changes_with_version():
                    schema_version="0.1.0", model="m", provider_id="p",
                    prompt_name="n")
     assert k1 != k2
+
+
+# ---- OpenAI 兼容 provider（真实 HTTP 后端，标准库实现，无第三方依赖）----
+def _http_response(content: str, usage: dict | None = None) -> mock.MagicMock:
+    data = {"choices": [{"message": {"content": content}}]}
+    if usage is not None:
+        data["usage"] = usage
+    resp = mock.MagicMock()
+    resp.read.return_value = json.dumps(data).encode("utf-8")
+    cm = mock.MagicMock()
+    cm.__enter__.return_value = resp
+    return cm
+
+
+def test_openai_provider_unconfigured_without_key():
+    p = OpenAICompatibleProvider(api_key="")
+    assert p.is_configured() is False
+
+
+def test_openai_provider_configured_with_key():
+    p = OpenAICompatibleProvider(api_key="test-key")
+    assert p.is_configured() is True
+
+
+def test_openai_provider_complete_unconfigured_raises():
+    p = OpenAICompatibleProvider(api_key="")
+    with pytest.raises(LLMNotConfiguredError):
+        p.complete([{"role": "user", "content": "hi"}])
+
+
+def test_openai_provider_success_accumulates_usage():
+    usage = {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+    p = OpenAICompatibleProvider(api_key="test-key")
+    with mock.patch("knowledge.providers.llm_provider.urllib.request.urlopen",
+                    return_value=_http_response("ok", usage)):
+        out = p.complete([{"role": "user", "content": "hi"}])
+    assert out == "ok"
+    assert p.n_calls == 1
+    assert p.n_success == 1
+    assert p.n_retries == 0
+    assert p.usage == usage
+
+
+def test_openai_provider_retries_transient_then_raises():
+    # 429 视为瞬态：按确定性退避重试，耗尽后抛 LLMTransportError（区别于 schema 失败）
+    p = OpenAICompatibleProvider(api_key="test-key", max_retries=2)
+    err = HTTPError("http://x", 429, "Too Many Requests", {}, None)
+    with mock.patch("knowledge.providers.llm_provider.urllib.request.urlopen",
+                    side_effect=err), \
+         mock.patch("knowledge.providers.llm_provider.time.sleep") as sleep:
+        with pytest.raises(LLMTransportError):
+            p.complete([{"role": "user", "content": "hi"}])
+    assert p.n_calls == 1
+    assert p.n_success == 0
+    assert p.n_retries == 2
+    assert sleep.call_count == 2
+
+
+def test_openai_provider_does_not_retry_permanent_4xx():
+    p = OpenAICompatibleProvider(api_key="test-key", max_retries=2)
+    err = HTTPError("http://x", 400, "Bad Request", {}, None)
+    with mock.patch("knowledge.providers.llm_provider.urllib.request.urlopen",
+                    side_effect=err):
+        with pytest.raises(LLMTransportError):
+            p.complete([{"role": "user", "content": "hi"}])
+    assert p.n_retries == 0
+
+
+def test_openai_provider_accumulate_usage_ignores_non_numeric():
+    p = OpenAICompatibleProvider(api_key="test-key")
+    p._accumulate_usage({"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
+    p._accumulate_usage({"prompt_tokens": "x", "completion_tokens": True})
+    assert p.usage == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+
+
+def test_openai_provider_captures_http_error_body():
+    # 400 响应体应被读入错误详情（定位内容审核/参数越界等真实原因）
+    import io
+    err = HTTPError("http://x", 400, "Bad Request", {},
+                    io.BytesIO(b'{"error": {"message": "content filtered"}}'))
+    detail = OpenAICompatibleProvider._error_detail(err)
+    assert "400" in detail and "content filtered" in detail
+
+
+def test_openai_provider_error_detail_non_http():
+    detail = OpenAICompatibleProvider._error_detail(KeyError("boom"))
+    assert "KeyError" in detail
+
+
+# ---- 缓存命中/未命中计量 ----
+def test_cache_backed_provider_counts_hits_and_misses(tmp_path):
+    inner = DummyLLMProvider(response="hello", provider_id="dummy", model="m")
+    p = CacheBackedLLMProvider(inner, LLMCache(tmp_path / "cache"))
+    assert p.complete([{"role": "user", "content": "x"}], cache_hint="k1") == "hello"
+    assert (p.cache_hits, p.cache_misses) == (0, 1)
+    assert p.complete([{"role": "user", "content": "x"}], cache_hint="k1") == "hello"
+    assert (p.cache_hits, p.cache_misses) == (1, 1)
+    # 无 cache_hint 的调用不改变命中/未命中计数
+    p.complete([{"role": "user", "content": "x"}])
+    assert (p.cache_hits, p.cache_misses) == (1, 1)

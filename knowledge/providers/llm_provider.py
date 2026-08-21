@@ -10,10 +10,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Protocol
 
 from ..analysis.base import LLMNotConfiguredError
+
+
+class LLMTransportError(RuntimeError):
+    """真实 provider 的网络/HTTP 错误（重试耗尽后抛出）。
+
+    与 LLMResponseError（响应已拿到但无法通过 schema 校验）语义分离，便于调用方
+    区分"传输失败"与"模型输出不合格"。
+    """
 
 
 class LLMProvider(Protocol):
@@ -59,6 +71,111 @@ class DummyLLMProvider:
 
     def complete(self, messages: list[dict], **kwargs) -> str:
         return self._response
+
+
+class OpenAICompatibleProvider:
+    """OpenAI 兼容 HTTP 后端（如 Aliyun DashScope compatible-mode）。
+
+    - 用标准库 urllib 实现，无第三方依赖（`.venv` 未装 `openai`/`requests`）；
+    - 密钥从环境变量读取，绝不落盘、绝不打印（也不进入 cache key）；
+    - 记录每次调用的 token 用量与重试次数，供冒烟/标定报表使用。
+
+    配置来源（环境变量，均可覆盖默认值）：
+        DASHSCOPE_API_KEY   必需，缺省即 is_configured() == False
+        DASHSCOPE_BASE_URL  默认 https://dashscope.aliyuncs.com/compatible-mode/v1
+        DASHSCOPE_MODEL     默认 qwen-plus
+    """
+
+    def __init__(self, *, api_key: str | None = None, base_url: str | None = None,
+                 model: str | None = None, provider_id: str = "dashscope",
+                 timeout: float = 120.0, max_retries: int = 2,
+                 temperature: float = 0.0, max_tokens: int = 2048):
+        self._api_key = (api_key if api_key is not None
+                         else os.environ.get("DASHSCOPE_API_KEY", ""))
+        self._base_url = (base_url or os.environ.get("DASHSCOPE_BASE_URL")
+                          or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+        self.model = model or os.environ.get("DASHSCOPE_MODEL") or "qwen-plus"
+        self.provider_id = provider_id
+        self._timeout = timeout
+        self._max_retries = max_retries
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        # 运行期计量（供冒烟报表；不参与缓存键）
+        self.n_calls = 0                 # 实际发出的 HTTP 请求数（= 缓存未命中数）
+        self.n_success = 0               # 成功返回文本的次数
+        self.n_retries = 0               # 因瞬态错误重试的次数
+        self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def is_configured(self) -> bool:
+        return bool(self._api_key)
+
+    def complete(self, messages: list[dict], **kwargs) -> str:
+        if not self.is_configured():
+            raise LLMNotConfiguredError("未配置 LLM provider（缺 DASHSCOPE_API_KEY）")
+        self.n_calls += 1
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": kwargs.get("temperature", self._temperature),
+            "max_tokens": kwargs.get("max_tokens", self._max_tokens),
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        url = f"{self._base_url}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        last_err: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            if attempt > 0:
+                self.n_retries += 1
+                time.sleep(float(attempt))  # 确定性退避：1s, 2s, ...
+            try:
+                req = urllib.request.Request(url, data=body, method="POST",
+                                             headers=headers)
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+                choices = data.get("choices") or []
+                content = (choices[0].get("message", {}).get("content", "")
+                           if choices else "")
+                usage = data.get("usage") or {}
+                self._accumulate_usage(usage)
+                self.n_success += 1
+                return content or ""
+            except (urllib.error.HTTPError, urllib.error.URLError,
+                    TimeoutError, OSError, json.JSONDecodeError, KeyError) as e:
+                last_err = e
+                status = getattr(e, "code", None)
+                # 4xx（除 429）为永久错误，不重试；其余瞬态错误重试
+                if isinstance(status, int) and 400 <= status < 500 and status != 429:
+                    break
+                continue
+        raise LLMTransportError(f"LLM 请求失败（{self.model} @ {self._base_url}）: "
+                                f"{self._error_detail(last_err)}")
+
+    @staticmethod
+    def _error_detail(e: Exception) -> str:
+        """提取错误详情（含 HTTP 响应体），供冒烟/标定报表定位真实失败原因。
+
+        400 等客户端错误常携带服务端给出的具体原因（内容审核、参数越界等）；这里
+        只读响应体（服务端错误描述），不读请求体，故不含密钥、不落盘、不打印密钥。
+        """
+        if isinstance(e, urllib.error.HTTPError):
+            try:
+                body = e.read().decode("utf-8", errors="replace").strip()
+            except Exception:
+                body = ""
+            reason = getattr(e, "reason", "") or getattr(e, "msg", "")
+            return f"HTTP {e.code} {reason}" + (f" | {body[:300]}" if body else "")
+        return repr(e)
+
+    def _accumulate_usage(self, usage: dict) -> None:
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            v = usage.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                self.usage[key] = self.usage.get(key, 0) + int(v)
 
 
 def cache_key(*, text: str, analyzer_id: str, analyzer_version: str,
@@ -110,6 +227,8 @@ class CacheBackedLLMProvider:
     def __init__(self, inner: LLMProvider, cache: LLMCache):
         self._inner = inner
         self._cache = cache
+        self.cache_hits = 0
+        self.cache_misses = 0
 
     @property
     def provider_id(self) -> str:
@@ -127,7 +246,9 @@ class CacheBackedLLMProvider:
         if cache_hint is not None:
             cached = self._cache.get(cache_hint)
             if cached is not None:
+                self.cache_hits += 1
                 return cached
+            self.cache_misses += 1
         result = self._inner.complete(messages, **kwargs)
         if cache_hint is not None:
             self._cache.put(cache_hint, result)
