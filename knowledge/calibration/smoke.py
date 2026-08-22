@@ -27,7 +27,7 @@ from ..analysis.style_analyzer import LLMFeatureAnalyzer
 from ..config import data_layout, data_root as default_data_root
 from ..corpus.metadata import CORPUS
 from ..providers.llm_provider import (
-    CacheBackedLLMProvider, LLMCache, LLMTransportError, OpenAICompatibleProvider,
+    CacheBackedLLMProvider, DeepSeekProvider, LLMCache, LLMTransportError,
 )
 from ..schema.feature_registry import FeatureDefinition, build_default_registry
 from ..schema.narrative_schema import NarrativeObservation
@@ -142,7 +142,7 @@ def run_smoke_calibration(data_root_: Path | None = None) -> dict[str, Any]:
 
     # ---- provider（真实后端 + 磁盘缓存）----
     provider = CacheBackedLLMProvider(
-        OpenAICompatibleProvider(),
+        DeepSeekProvider(),
         LLMCache(out_dir["cache"]),
     )
 
@@ -288,7 +288,7 @@ def run_smoke_calibration(data_root_: Path | None = None) -> dict[str, Any]:
         chunks_out.append(chunk_rec)
 
     # ---- 汇总 ----
-    inner = provider._inner  # OpenAICompatibleProvider（暴露计量）
+    inner = provider._inner  # DeepSeekProvider（暴露计量）
     metrics = {
         "requests": {
             "total": inner.n_calls,

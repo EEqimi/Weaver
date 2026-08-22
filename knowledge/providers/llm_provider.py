@@ -74,28 +74,35 @@ class DummyLLMProvider:
 
 
 class OpenAICompatibleProvider:
-    """OpenAI 兼容 HTTP 后端（如 Aliyun DashScope compatible-mode）。
+    """OpenAI 兼容 HTTP 后端（通用传输层，可接 DeepSeek / DashScope / 智谱GLM 等）。
 
     - 用标准库 urllib 实现，无第三方依赖（`.venv` 未装 `openai`/`requests`）；
     - 密钥从环境变量读取，绝不落盘、绝不打印（也不进入 cache key）；
     - 记录每次调用的 token 用量与重试次数，供冒烟/标定报表使用。
 
-    配置来源（环境变量，均可覆盖默认值）：
-        DASHSCOPE_API_KEY   必需，缺省即 is_configured() == False
-        DASHSCOPE_BASE_URL  默认 https://dashscope.aliyuncs.com/compatible-mode/v1
-        DASHSCOPE_MODEL     默认 qwen-plus
+    子类通过类属性提供默认值；显式参数 > 环境变量 > 类默认：
+        api_key    显式密钥，缺省读 `{ENV_PREFIX}_API_KEY`
+        base_url   显式地址，缺省读 `{ENV_PREFIX}_BASE_URL`，再缺省用类默认
+        model      显式模型，缺省读 `{ENV_PREFIX}_MODEL`，再缺省用类默认
     """
 
+    provider_id: str = "openai-compatible"
+    env_prefix: str = "OPENAI"
+    default_base_url: str = "https://api.openai.com/v1"
+    default_model: str = "gpt-4o-mini"
+
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None,
-                 model: str | None = None, provider_id: str = "dashscope",
+                 model: str | None = None, provider_id: str | None = None,
                  timeout: float = 120.0, max_retries: int = 2,
                  temperature: float = 0.0, max_tokens: int = 2048):
+        self._env_prefix = self.env_prefix.rstrip("_").upper()
         self._api_key = (api_key if api_key is not None
-                         else os.environ.get("DASHSCOPE_API_KEY", ""))
-        self._base_url = (base_url or os.environ.get("DASHSCOPE_BASE_URL")
-                          or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
-        self.model = model or os.environ.get("DASHSCOPE_MODEL") or "qwen-plus"
-        self.provider_id = provider_id
+                         else os.environ.get(f"{self._env_prefix}_API_KEY", ""))
+        self._base_url = (base_url or os.environ.get(f"{self._env_prefix}_BASE_URL")
+                          or self.default_base_url).rstrip("/")
+        self.model = (model or os.environ.get(f"{self._env_prefix}_MODEL")
+                      or self.default_model)
+        self.provider_id = provider_id or self.provider_id
         self._timeout = timeout
         self._max_retries = max_retries
         self._temperature = temperature
@@ -111,7 +118,8 @@ class OpenAICompatibleProvider:
 
     def complete(self, messages: list[dict], **kwargs) -> str:
         if not self.is_configured():
-            raise LLMNotConfiguredError("未配置 LLM provider（缺 DASHSCOPE_API_KEY）")
+            raise LLMNotConfiguredError(
+                f"未配置 LLM provider（缺 {self._env_prefix}_API_KEY）")
         self.n_calls += 1
         payload = {
             "model": self.model,
@@ -176,6 +184,24 @@ class OpenAICompatibleProvider:
             v = usage.get(key)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 self.usage[key] = self.usage.get(key, 0) + int(v)
+
+
+class DashScopeProvider(OpenAICompatibleProvider):
+    """Aliyun DashScope（百炼）compatible-mode 后端。"""
+
+    provider_id = "dashscope"
+    env_prefix = "DASHSCOPE"
+    default_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    default_model = "qwen-plus"
+
+
+class DeepSeekProvider(OpenAICompatibleProvider):
+    """DeepSeek 后端（OpenAI 兼容；默认 `deepseek-chat`）。"""
+
+    provider_id = "deepseek"
+    env_prefix = "DEEPSEEK"
+    default_base_url = "https://api.deepseek.com"
+    default_model = "deepseek-chat"
 
 
 def cache_key(*, text: str, analyzer_id: str, analyzer_version: str,

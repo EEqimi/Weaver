@@ -469,6 +469,66 @@ narrative, C strategy match+discover) and produce an inspectable per-chunk repor
 
 ---
 
+## Checkpoint — Phase 4.3.1: Provider Switch (DashScope → DeepSeek)
+
+DashScope（百炼）账户欠费（`Arrearage`）阻塞了标定；换成 DeepSeek（OpenAI 兼容，
+`deepseek-chat`），无需改动任何 analyzer / rubric / prompt。架构本就厂商无关
+（`LLMProvider` 协议 + 注入），这次只是把具体 provider 预设从 DashScope 换到
+DeepSeek。
+
+### Implementation
+- `knowledge/providers/llm_provider.py` — 把 `OpenAICompatibleProvider` 泛化为
+  通用 OpenAI 兼容传输层（显式参数 > 环境变量 `{ENV_PREFIX}_*` > 类默认），新增
+  两个预设子类：`DeepSeekProvider`（`deepseek-chat` @ `https://api.deepseek.com`，
+  环境变量 `DEEPSEEK_API_KEY`）与 `DashScopeProvider`（保留旧后端，供回退/对照）。
+- `knowledge/calibration/smoke.py` — `run_smoke_calibration()` 改用
+  `DeepSeekProvider()`（缓存键因 `provider_id`/`model` 变化而自动隔离，不混用旧
+  DashScope 缓存）。
+- `AI_coding/utils/config.py` 是独立的旧 App 配置，仍指向 DashScope，本次未动。
+
+### Tests
+- **136 passed**（was 132）。新增 `DeepSeekProvider`（默认值 / 无 key 不可用 /
+  读 `DEEPSEEK_API_KEY`）与 `DashScopeProvider`（保留旧默认）预设测试。
+
+### Blocker (next step)
+- 需要设置 `DEEPSEEK_API_KEY`（当前未设），否则 `DeepSeekProvider.is_configured()`
+  为 False，冒烟/标定会显式不可用。设好后重跑 4-chunk 冒烟，再跑 40-chunk 标定。
+
+---
+
+## Checkpoint — Phase 4.3.2: Smoke re-run on DeepSeek (clean)
+
+**Status:** COMPLETE。4-chunk 冒烟在 DeepSeek 后端干净重跑通过，测量系统端到端
+验证完成。仍 **不** 是 40-chunk 标定（spec §13/§14 仍停在标定前）。
+
+### Goal
+Phase 4.3.1 的阻塞是 `DEEPSEEK_API_KEY` 未设；设好后在 DeepSeek `deepseek-chat`
+上重跑 4-chunk 冒烟，验证换后端后全链路（Layer A judgment/hybrid、B 叙事、C
+策略 match+discover）端到端可用，并产出可检视报告。
+
+### Experimental results (real LLM — `deepseek-chat`)
+- 44 请求（11 × 4），**44 成功**，0 schema/JSON 失败，0 重试，0 传输失败。
+- Token：39,174 in / 11,324 out / **50,498 total**（缓存 0 命中 / 44 未命中，全新后端）。
+- 评估状态：observed=20，insufficient_evidence=0，not_observable=0。
+- 证据：**161 verified / 6 unverified**（未静默丢弃）；叙事证据降级 0。
+- 策略：9 匹配、7 发现、**1 次 zero-verified-evidence 拒绝**、0 未知策略拒绝。
+  被拒项：`Physical gesture as psychological revelation`（conf=0.9，无已验证引文）
+  ——Phase 3–4.2 的零证据拒绝契约在真实后端上首次生效。
+- 对比旧 DashScope 跑：37/44（7 次欠费失败）→ **44/44**；0 发现 → 7 发现。
+- Artifacts：`data/analysis/calibration/{smoke_results.json, smoke_report.md}`。
+
+### Notes
+- DeepSeek 缓存键与旧 DashScope 缓存隔离（`provider_id`/`model` 进入 `cache_key`），
+  本次 0 命中 / 44 未命中属预期（全新后端首次跑）。
+- 冒烟仍只验证测量系统，不做 Work/Author 聚合、不推进策略生命周期、不晋升
+  `candidate_core`。
+
+### Next step
+- 40-chunk 采样标定（Layer A judgment/hybrid、B、C）——仍停在 spec §13/§14 复审
+  检查点之后才启动。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

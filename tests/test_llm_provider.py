@@ -2,6 +2,7 @@
 """LLM 分析器与 provider 抽象测试（spec §12）：无 provider 显式不可用、
 schema 校验、malformed 响应报错、缓存键可复现。"""
 import json
+import os
 from unittest import mock
 from urllib.error import HTTPError
 
@@ -13,8 +14,9 @@ from knowledge.analysis.base import (
 from knowledge.analysis.narrative_analyzer import NarrativeAnalyzer
 from knowledge.analysis.style_analyzer import LLMFeatureAnalyzer
 from knowledge.providers.llm_provider import (
-    CacheBackedLLMProvider, DummyLLMProvider, LLMCache, LLMTransportError,
-    OpenAICompatibleProvider, UnconfiguredLLMProvider, cache_key,
+    CacheBackedLLMProvider, DashScopeProvider, DeepSeekProvider, DummyLLMProvider,
+    LLMCache, LLMTransportError, OpenAICompatibleProvider,
+    UnconfiguredLLMProvider, cache_key,
 )
 from knowledge.schema.feature_registry import build_default_registry
 
@@ -340,6 +342,34 @@ def test_openai_provider_captures_http_error_body():
 def test_openai_provider_error_detail_non_http():
     detail = OpenAICompatibleProvider._error_detail(KeyError("boom"))
     assert "KeyError" in detail
+
+
+# ---- 具体 provider 预设：DeepSeek（新默认）与 DashScope（保留）----
+def test_deepseek_provider_defaults():
+    p = DeepSeekProvider(api_key="sk-test")
+    assert p.provider_id == "deepseek"
+    assert p.model == "deepseek-chat"
+    assert p._base_url == "https://api.deepseek.com"
+    assert p.is_configured() is True
+
+
+def test_deepseek_provider_unconfigured_without_key():
+    with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}):
+        p = DeepSeekProvider()
+        assert p.is_configured() is False
+
+
+def test_deepseek_provider_reads_env_key():
+    with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-env"}):
+        p = DeepSeekProvider()
+        assert p.is_configured() is True
+
+
+def test_dashscope_provider_preserves_legacy_defaults():
+    p = DashScopeProvider(api_key="sk-test")
+    assert p.provider_id == "dashscope"
+    assert p.model == "qwen-plus"
+    assert p._base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
 # ---- 缓存命中/未命中计量 ----

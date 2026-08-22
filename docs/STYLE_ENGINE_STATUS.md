@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 4.3 (LLM smoke calibration, 4 chunks) — COMPLETE |
-| **Last completed checkpoint** | Phase 4.3 LLM smoke calibration: real `qwen-plus` backend end-to-end on 4 chunks (Layer A/B/C), 132 tests, 37/44 success — 7 failures are DashScope `Arrearage` (billing), not code |
+| **Current phase** | Phase 4.3.2 (LLM smoke re-run on DeepSeek, 4 chunks) — COMPLETE |
+| **Last completed checkpoint** | 4-chunk smoke re-run clean on DeepSeek (`deepseek-chat`): 44/44 success, 0 retries, 0 schema/JSON failures, 1 zero-evidence rejection fired; 136 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -16,8 +16,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - Layer A deterministic analyzer: 22 features.
 - Layer D stylometry: extraction + Burrows Delta + PCA + clustering + SVM/logreg validation (GroupKFold, held-out), leak-free grouped CV (per-fold vectorizer refit), function-word/word-unigram overlap audit.
 - LLM provider abstraction (cacheable, unconfigured-safe).
-- Real LLM backend: `OpenAICompatibleProvider` (DashScope compatible-mode, stdlib,
-  transport error body capture, runtime metering) + cache hit/miss counters.
+- Real LLM backend: `DeepSeekProvider` (`deepseek-chat`, OpenAI-compatible, stdlib
+  urllib, transport error body capture, runtime metering) + cache hit/miss counters.
 - Smoke calibration: `knowledge/calibration/smoke.py` (4-chunk end-to-end run with
   JSON + Markdown report and rejection accounting).
 - Profile aggregation: `ChunkProfile → WorkProfile → AuthorProfile`, type-aware, preserving uncertainty/evidence/provenance.
@@ -44,10 +44,10 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
-- **132 tests passed** (was 114). New regression tests cover: OpenAICompatibleProvider
+- **136 tests passed** (was 132). New regression tests cover: OpenAICompatibleProvider
   (configured/unconfigured, success+usage, 429 retry/backoff, permanent-4xx no-retry,
-  HTTP error-body capture), cache hit/miss counters, StrategyMiner rejection collector,
-  and smoke `_bump`/`_feature_report`.
+  HTTP error-body capture), DeepSeek/DashScope provider presets, cache hit/miss counters,
+  StrategyMiner rejection collector, and smoke `_bump`/`_feature_report`.
 
 ## Latest experiment results (deterministic, no LLM)
 - Layer A: 2,328 TRAIN chunks × 22 features.
@@ -59,22 +59,30 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - Calibration sample: 40 chunks (4 × 10), `seq`-ordered deterministic stratified,
   held-out excluded.
 
-### LLM smoke calibration (real `qwen-plus`, 4 chunks)
+### LLM smoke calibration (real `deepseek-chat`, 4 chunks) — CLEAN
+- 44 requests (11 × 4), **44 success**, 0 schema/JSON failures, 0 retries, 0
+  transport failures.
+- Token usage 50,498 (39,174 in / 11,324 out); cache 0 hit / 44 miss (fresh backend).
+- Assessment: observed=20, insufficient=0, not_observable=0; evidence 161 verified
+  / 6 unverified; 0 narrative downgrades.
+- Strategies: 9 matches, 7 discoveries, **1 zero-evidence rejection** (contract
+  fired on real backend), 0 unknown-strategy rejections.
+- Artifacts: `data/analysis/calibration/{smoke_results.json, smoke_report.md}`.
+
+### LLM smoke calibration (previous backend — real `qwen-plus`/DashScope, 4 chunks)
+- Retained for history; superseded by the DeepSeek run above.
 - 44 requests (11 × 4), 37 success, 0 schema/JSON failures, 0 retries.
 - 7 failures — all `HTTP 400 Arrearage` (DashScope overdue payment), on the last
   chunk; account cut off mid-run. Environmental, not code.
 - Token usage 42,349 (33,220 in / 9,129 out); 6 strategy matches, 0 discoveries,
   0 zero-evidence rejections, 0 narrative downgrades; 114 verified / 18 unverified
   evidence quotes.
-- Artifacts: `data/analysis/calibration/{smoke_results.json, smoke_report.md}`.
 
 ## Current blockers / review items
-- **DashScope account in arrears (`Arrearage`)** — top up before the 40-chunk
-  calibration, or the run will be denied partway.
 - **Awaiting review** of the Phase 3–4.2 contract checkpoint before the full
   sampled calibration. `candidate_core` features must remain un-promoted.
 
 ## Next planned action
-- After topping up the account: run the sampled LLM calibration (Layer A
-  judgment/hybrid, B, C on the 40-chunk sample) with the configured, cache-backed
-  provider; then aggregate evidence and re-evaluate before Phase 5.
+- Run the sampled LLM calibration (Layer A judgment/hybrid, B, C on the 40-chunk
+  sample) with the configured, cache-backed DeepSeek provider; then aggregate
+  evidence and re-evaluate before Phase 5. (Still gated on the Phase 3–4.2 review.)
