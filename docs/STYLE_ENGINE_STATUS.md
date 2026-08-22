@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 4.4 (40-chunk sampled LLM calibration) — COMPLETE |
-| **Last completed checkpoint** | 40-chunk sampled calibration clean on DeepSeek (`deepseek-chat`): 440 requests, Layer A 318/320 (2 evidence-enforcement rejections), 148 matches / 71 discoveries / 17 zero-evidence rejections, registry 75 strategies (9 validated / 29 candidate / 37 discovered); 138 tests |
+| **Current phase** | Phase 4.5 (author-scoped Strategy Consolidation) — COMPLETE (infra + input artifacts; **no paid LLM**, stopped before review) |
+| **Last completed checkpoint** | Author-scoped consolidation infra: `RawStrategy`/`CanonicalStrategy` two-layer schema, `StrategyConsolidator` (author-scope isolation + structured-mapping validation), per-author `consolidation_input.json` (Austen 51 / Dickens 44 raw); 151 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -30,7 +30,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 ## What is partially implemented
 - Layer A judgment/hybrid, Layer B (narrative), Layer C (strategies) analyzers are **written and run on the 40-chunk calibration sample** (real `deepseek-chat`); not yet run on the full corpus.
-- Strategy registry lifecycle implemented and exercised (75 strategies, 9 validated / 29 candidate / 37 discovered).
+- Strategy registry lifecycle implemented and exercised but **global/cross-author** (75 strategies, 9 validated / 29 candidate / 37 discovered); author-scoped canonical consolidation supersedes it for author profiles.
+- Author-scoped strategy consolidation infrastructure written (`StrategyConsolidator`); the paid canonical consolidation is **not yet run** — per-author input artifacts generated, awaiting review.
 
 ## What is not implemented yet
 - Full-corpus LLM feature extraction (only the 40-chunk calibration sample has LLM features).
@@ -44,10 +45,11 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
-- **138 tests passed** (was 136). Two new regression tests cover the Phase 4.4
-  `StrategyEvidence.strategy_id` fix (field carried on the dataclass; work-profile
-  strategy evidence counting by `strategy_id`). Earlier provider/cache/miner tests
-  from Phase 4.3 remain.
+- **151 tests passed** (was 138). +13 Phase 4.5 tests: author-scope isolation,
+  missing-author rejection, complete source coverage, duplicate-assignment /
+  hallucinated / missing source-id rejection, canonical provenance
+  (raw→chunk→work→evidence), cross-author same-name ids, canonical-id stability,
+  exact-dup fold, no name-similarity merge, dummy end-to-end consolidate.
 
 ## Latest experiment results (deterministic, no LLM)
 - Layer A: 2,328 TRAIN chunks × 22 features.
@@ -94,12 +96,27 @@ Short current-state snapshot (≈1–2 min read). History lives in
   0 zero-evidence rejections, 0 narrative downgrades; 114 verified / 18 unverified
   evidence quotes.
 
+## Phase 4.5 consolidation input (infrastructure only; no LLM called)
+- Austen **51** raw strategies; Dickens **44** (author-partitioned from the Phase 4.4
+  registry; 20 strategies appear in both authors → partitioned, never merged).
+- Exact-duplicate fold: 0 (near-duplicates differ in description due to the discover
+  hash suffix — the LLM semantic merge is what collapses them).
+- Estimates (single-shot, DeepSeek `deepseek-chat`): Austen 1 req ~13.1k in / ~3.1k out;
+  Dickens 1 req ~11.0k in / ~2.6k out. No existing consolidation cache.
+- Artifacts: `data/analysis/consolidation/{austen,dickens}_consolidation_input.json`,
+  `consolidation_summary.json`.
+
 ## Current blockers / review items
-- **discover 去重缺口**：`_to_strategy` 用 description hash 追加后缀，跨 chunk 同名
-  策略生成不同 id，37 个 discovered 多为单 chunk 单例；Phase 5 前应改为稳定 id 去重。
+- **Awaiting review** of `data/analysis/consolidation/{austen,dickens}_consolidation_input.json`
+  + `consolidation_summary.json` before running the paid canonical consolidation.
+- **Data anomaly (flagged, not yet fixed):** 20 registry strategies carry cross-author
+  evidence; 2 stay `validated` despite it (monotonic lifecycle masked the crossover).
+  Author-scoped `support_status` recomputes correctly; the global registry `status` must
+  not be read as an author-level claim.
 - `candidate_core` 特征仍不得晋升（校准仅标定样本，不足以晋升）。
 
 ## Next planned action
-- Phase 5 (author-profile synthesis): solve discover dedup (stable ids), then decide
-  on full-corpus LLM feature extraction scale vs the 40-chunk sample before author-
-  level synthesis / mixed model / planner / generation loop.
+- Review the consolidation input artifacts; on approval, run the paid author-scoped
+  consolidation (1 request per author, DeepSeek `deepseek-chat`, ~13k+3k Austen /
+  ~11k+3k Dickens est. tokens), then build canonical author strategy sets → Phase 5
+  synthesis.

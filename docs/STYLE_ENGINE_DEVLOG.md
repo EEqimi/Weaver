@@ -599,6 +599,80 @@ C 策略 match+discover 在 40-chunk 采样清单上端到端运行，策略生�
 
 ---
 
+## Checkpoint — Phase 4.5: Author-scoped Strategy Consolidation（基础设施 + 输入产物）
+
+**Status:** COMPLETE — **停在真正付费 consolidation 之前**（等待 review）。本阶段只建
+两层 schema、consolidation 基础设施与作者级输入产物；**未调用任何付费 LLM**。
+
+### Goal
+Phase 4.4 暴露了策略发现的结构性问题：同一文学机制在不同 chunk 因 name/description/
+trigger/operation/effect 措辞不同而被登记为多个 Strategy。本阶段引入"raw → canonical"
+两层结构，把作者级合并做成**严格 author-scoped、不删除原始数据、可追溯**的基础设施，
+并产出作者级 consolidation 输入产物供 review。
+
+### Implementation
+- `knowledge/schema/strategy_schema.py` — 新增两层结构：
+  - `RawStrategy`（作者归一后的合并输入单元，携带作者范围内证据与 `source_strategy_ids`）；
+  - `ConsolidationGroup`（LLM 返回的结构化分组映射，`from_dict`/`to_dict`）；
+  - `CanonicalStrategy`（作者级规范化策略：`source_strategy_ids` / `supporting_chunk_ids`
+    / `supporting_work_ids` / `evidence` / 支持计数 / `support_status`）；
+  - `canonical_strategy_id(author_id, name)` → `"{author_id}::{slug}"`（只从 name 派生，
+    不依赖 description 自由文本 hash）。
+- `knowledge/strategies/consolidation.py` — `StrategyConsolidator`：
+  确定性预处理（NFC + name/whitespace 归一 + 精确结构重复折叠）、`validate_author_scope`
+  （越界/缺作者拒绝）、`validate_mapping`（恰好一次 / 无幻觉 / 无重复 / 无丢失）、
+  `build_canonicals`（纯函数、完全可追溯）、`build_prompt`、`consolidate`（全流程，
+  未配置 provider 显式不可用）。
+- `knowledge/calibration/consolidation_input.py` — `build_consolidation_inputs()`：从
+  `strategy_registry.json` 按作者分区，写出每作者 `consolidation_input.json`（含 prompt
+  与 token/请求估算）+ 汇总 + 异常标注，**复用 Phase 4.4 结果，绝不重跑 analyzer**。
+- `knowledge/schema/versions.py` — 新增 `CANONICAL_STRATEGY_SCHEMA_VERSION` 与
+  `STRATEGY_CONSOLIDATOR_VERSION`（**不 bump** `STRATEGY_SCHEMA_VERSION`，以免让 Phase 4.4
+  的 strategy match/discover 缓存键失效）。
+
+### Architecture decisions（本阶段必须固化的边界）
+1. **每个作者独立构建知识库** —— 不共享、不交叉；
+2. **Raw Strategy 永久保留** —— `CreativeStrategy`/`StrategyEvidence` 是原始观察，绝不覆盖；
+3. **LLM consolidation 只创建 canonical mapping，不删除原始数据** —— 输出结构化分组，
+   不直接改注册表；
+4. **consolidation 严格 author-scoped** —— 一次只处理一位作者，越界/缺作者一律拒绝；
+5. **不同作者允许同名 canonical strategy** —— `austen::dramatic_irony` 与
+   `dickens::dramatic_irony` id 不冲突；
+6. **作者级 lifecycle 独立** —— canonical 的 `support_status` 只按该作者证据重算；
+7. **新作者加入不要求重算已有作者** —— 作者知识库边界独立；
+8. **本阶段不引入 vector database** —— FAISS/Chroma/Milvus 等属未来检索层，非 Phase 4.5；
+9. **Phase 4.4 的 40-chunk 结果复用** —— 不重跑 analyzer。
+
+### Data（复用 Phase 4.4 注册表，按作者分区）
+- Austen：**51** raw strategies（candidate 24 / discovered 22 / validated 5 legacy），
+  11 个跨 ≥2 作品；Dickens：**44**（candidate 23 / discovered 15 / validated 6 legacy），
+  12 个跨 ≥2 作品。精确去重折叠：0（近重复策略因 `_to_strategy` 的 description-hash
+  后缀而 description 不同，故不被"精确一致"折叠——这正是 LLM 语义合并要解决的）。
+- 估算（单次 shot，DeepSeek `deepseek-chat`）：
+  - Austen 1 请求，~13.1k input + ~3.1k output token；
+  - Dickens 1 请求，~11.0k input + ~2.6k output token；
+  - 无既有 consolidation 缓存。
+
+### Data anomaly（发现并标注）
+- 全局注册表生命周期**单调且跨作者**：20 个策略在两位作者名下都有证据；其中
+  **2 个策略虽标 `validated`，却残留跨作者证据**（`delayed_revelation_through_character_reaction`、
+  `interrogative_escalation_through_repeated_conditional_challenges`）——先在 Dickens 内
+  达 validated，之后混入 Austen 证据因单调不降而残留。这印证了"必须先按作者分区再定级"；
+  `author_scoped_support_status` 已在产物中按作者重算。
+
+### Tests
+- **151 passed**（was 138，+13）。覆盖：author scope 隔离 / 缺失作者拒绝 / 完整覆盖 /
+  重复赋值拒绝 / 幻觉 id 拒绝 / 丢失 id 拒绝 / canonical 溯源（raw→chunk→work→evidence）/
+  跨作者同名 canonical id 不冲突 / canonical id 稳定不依赖 description / 精确去重折叠 /
+  不按名称近似做语义合并 / dummy 端到端 / consolidate 在调用 LLM 前拒绝跨作者输入。
+
+### Next step（停在 review 检查点）
+- Review `data/analysis/consolidation/{austen,dickens}_consolidation_input.json` 与
+  `consolidation_summary.json`，确认 raw 数量、prompt、估算后，再放行真正付费
+  consolidation（单次/作者）。尚未调用任何 LLM。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git
