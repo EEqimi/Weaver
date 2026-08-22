@@ -529,6 +529,76 @@ Phase 4.3.1 的阻塞是 `DEEPSEEK_API_KEY` 未设；设好后在 DeepSeek `deep
 
 ---
 
+## Checkpoint — Phase 4.4: 40-chunk Sampled LLM Calibration
+
+**Status:** COMPLETE。第一次真实采样标定跑通——Layer A judgment/hybrid、B 叙事、
+C 策略 match+discover 在 40-chunk 采样清单上端到端运行，策略生命周期写回规范注册表，
+聚合出 Work/Author 画像。spec §13/§14 的"标定前复审"检查点已由用户放行。
+
+### Goal
+在 4-chunk 冒烟（测量系统验证）通过后，用缓存后端的 DeepSeek `deepseek-chat` 对
+40-chunk 采样清单跑完整标定，产出可检视的 JSON/MD 报告、Chunk/Work/Author 画像与
+策略注册表，为 Phase 5（作者级综合）铺路。
+
+### Implementation
+- `knowledge/calibration/calibrate.py` — `run_sampled_calibration()`：读采样清单，
+  逐 chunk 跑 Layer A（8 LLM 特征）/ B / C（match+discover 经规范注册表，discover
+  写回生命周期），构建 `ChunkProfile`，聚合 Work/Author 画像，产出
+  `calibration_results.json` + `calibration_report.md` + `profiles/` +
+  `strategy_registry.json`。复用 smoke.py 的 provider/缓存/计量与辅助函数。
+- `knowledge/schema/strategy_schema.py` — `StrategyEvidence` 补 `strategy_id`
+  （默认空串，兼容旧位置参数构造），`to_dict()` 一并序列化。
+- `knowledge/analysis/strategy_miner.py` — match/discover 构造证据时传入
+  `strategy_id`。
+
+### Architecture decisions
+- discover 注册策略时先以 `evidence=[]` 注册（避免证据双计），再把逐条证据经
+  `record_evidence` 写回；否则策略已注册时证据不会被登记。
+- 采样清单固定（position × dialogue 分层、`seq` 有序、held-out 排除），4 works × 10。
+
+### Experimental results (real LLM — `deepseek-chat`)
+- 440 请求（40 chunk × 11）；44 命中冒烟缓存、396 全新。token 未直接计量——首次
+  运行在聚合阶段崩溃、计量未落盘；重跑为 100% 缓存命中（report 里 `requests=0` 即
+  缓存重放）。按冒烟每请求均值（50,498/44 ≈ 1,148）估算：**~455k 全新 + 50.5k
+  冒烟已付 ≈ ~505k total**。
+- Layer A：320 调用 → 318 成功；**2 次高置信正向判定无已验证证据被拒**（非 JSON
+  解析失败，是 Phase 3–4.2 task item 5/6 的证据强制契约）；0 unavailable、0 传输失败。
+- Layer B：40/40；Layer C：match 40/40，discover 40/40。
+- assessment_status：observed=198，insufficient_evidence=0，not_observable=0。
+- 证据：**verified=1718，unverified=79**（未静默丢弃）；叙事证据降级 0。
+- 策略：**148 匹配、71 发现、17 零证据拒绝、0 未知策略拒绝**。
+- 注册表：**75 策略 = 9 validated / 29 candidate / 37 discovered**（自 4 个 seed
+  candidate 起）。9 个 validated 例：`objectification_of_emotion`、
+  `narrative_irony_through_free_indirect_discourse`、
+  `free_indirect_discourse_for_moral_self_assessment`、
+  `delayed_revelation_through_character_reaction` 等。
+- 作者画像 LLM 特征均值（type-aware；个别 n=19 因上述 2 次证据拒绝）初步分化：
+  `simile_frequency` austen 0.72 vs dickens 2.52；`metaphor_frequency` 13.95 vs 17.52；
+  `irony_frequency` 8.92 vs 6.22。（40-chunk 仅标定样本，不足以下作者级结论。）
+
+### Issues discovered / Fixes
+- **首次运行在聚合阶段崩溃**：`Aggregator._count_strategy_evidence` 引用
+  `StrategyEvidence.strategy_id`，但该字段此前不存在（确定性流水线从不填充
+  strategy_evidence，故从未触发）。修复：补 `strategy_id` 字段并在 match/discover
+  两处构造时传入。重跑（全部缓存命中、0 新增 token）通过。
+- 计量未持久化：崩溃发生在报告写出前，token 用量未落盘；已按估算记录（见上）。
+
+### Known limitations / TODO
+- **discover 去重缺口**：`_to_strategy` 对同名策略用 description hash 追加后缀，
+  跨 chunk 重新发现同一策略会生成不同 id，无法干净聚合（37 个 discovered 多为单
+  chunk 单例）。Phase 5 前应改为稳定 id 去重。
+- 40-chunk 仅标定样本，LLM 特征未对全语料运行。
+
+### Tests
+- **138 passed**（was 136）。新增 `StrategyEvidence.strategy_id` 携带 + work 画像按
+  策略计数回归测试。
+
+### Next step
+- Phase 5（author-profile synthesis / 混合模型 / planner / generation loop），先解决
+  discover 去重与全量 LLM 特征的可扩展性。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

@@ -102,6 +102,7 @@ class StrategyMiner:
             unverified = [q for q in check.unverified if isinstance(q, str)]
             ev = StrategyEvidence(
                 chunk_id=chunk_id, work_id=work_id, author_id=author_id,
+                strategy_id=sid,
                 quote=verified[0] if verified else "",
                 quotes=verified, unverified_quotes=unverified,
                 confidence=confidence,
@@ -182,7 +183,8 @@ class StrategyMiner:
             intended_effects=[str(e) for e in (it.get("intended_effects") or [])],
             confidence=confidence,
             evidence=[StrategyEvidence(chunk_id=chunk_id, work_id=work_id,
-                                       author_id=author_id, quote=q, quotes=[q],
+                                       author_id=author_id, strategy_id=sid,
+                                       quote=q, quotes=[q],
                                        confidence=confidence,
                                        analyzer_id=ANALYZER_ID,
                                        analyzer_version=ANALYZER_VERSION,

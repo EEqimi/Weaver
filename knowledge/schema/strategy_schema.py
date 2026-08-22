@@ -36,6 +36,7 @@ class StrategyEvidence:
     chunk_id: str
     work_id: str
     author_id: str
+    strategy_id: str = ""                             # 该证据支持哪个策略（聚合计数需要）
     quote: str = ""                                   # 首条有效引文（向后兼容）
     quotes: list[str] = field(default_factory=list)   # 全部有效引文
     unverified_quotes: list[str] = field(default_factory=list)  # 无法验证的引文
@@ -49,6 +50,7 @@ class StrategyEvidence:
             "chunk_id": self.chunk_id,
             "work_id": self.work_id,
             "author_id": self.author_id,
+            "strategy_id": self.strategy_id,
             "quote": self.quote,
             "quotes": self.quotes,
             "unverified_quotes": self.unverified_quotes,

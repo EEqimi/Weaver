@@ -213,3 +213,24 @@ def test_seed_registry_has_four_candidates():
     reg = seed_default_registry()
     assert len(reg) == 4
     assert all(s.status == StrategyStatus.CANDIDATE.value for s in reg.all())
+
+
+def test_strategy_evidence_carries_strategy_id():
+    # 回归：StrategyEvidence 必须携带 strategy_id，否则 work 画像按策略计数
+    # 会 AttributeError（Phase 4.4 首次填充 strategy_evidence 时暴露）。
+    ev = StrategyEvidence("c1", "w1", "austen", strategy_id="sid_a")
+    assert ev.strategy_id == "sid_a"
+    # 缺省为空，兼容旧的位置参数构造
+    assert StrategyEvidence("c1", "w1", "austen").strategy_id == ""
+
+
+def test_work_profile_counts_strategy_evidence_by_strategy_id():
+    p1 = ChunkProfile("c1", "w1", "austen", strategy_evidence=[
+        StrategyEvidence("c1", "w1", "austen", strategy_id="sid_a"),
+        StrategyEvidence("c1", "w1", "austen", strategy_id="sid_b"),
+    ])
+    p2 = ChunkProfile("c2", "w1", "austen", strategy_evidence=[
+        StrategyEvidence("c2", "w1", "austen", strategy_id="sid_a"),
+    ])
+    wp = Aggregator().aggregate_work([p1, p2])
+    assert wp.strategies == {"sid_a": 2, "sid_b": 1}
