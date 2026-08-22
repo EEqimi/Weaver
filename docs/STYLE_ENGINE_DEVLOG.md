@@ -673,6 +673,46 @@ trigger/operation/effect 措辞不同而被登记为多个 Strategy。本阶段�
 
 ---
 
+## Checkpoint — Phase 4.5.1: Consolidation-quality fix（输入提示词 + 严格校验 + id 稳定性文档）
+
+**Status:** COMPLETE — REVIEW PENDING（仍未调用任何付费 LLM，停在 review 检查点）
+
+### Goal
+放行付费 consolidation 前的一轮质量修复：让 LLM 能基于「定义 + 真实文本证据」判断语义
+同一性；让输出校验对非法字段显式报错而非静默兜底；并固化 canonical id 的长期稳定性约定。
+
+### Implementation
+1. **提示词加入紧凑支持/证据上下文**（`StrategyConsolidator.build_prompt`）：每个发送的
+   `RawStrategy` 追加 `support: chunks=N works=M status=… [confidence=…]`，并附**至多 2 条
+   已验证短引文**（每条 ≤80 字符、压缩空白、去重；`unverified_quotes` 绝不进入提示词）。
+   让 LLM 从「触发/操作/效果」定义与「真实文本证据」两方面判断语义同一性，token 增长
+   控制在 ~2–3k/作者。
+2. **严格输出校验**（`ConsolidationGroup.from_dict`）：`canonical_name` /
+   `canonical_description` 必须非空、`source_strategy_ids` 必须非空字符串列表、
+   `confidence` 必须是 [0,1] 内数值（int/float，布尔除外）。缺失/非法字段抛 `ValueError`，
+   `consolidate` 捕获后转 `LLMResponseError`；**绝不静默把非法 confidence 转成 None**
+   （删除 `_safe_confidence` 静默兜底）。`reasoning_summary` 仍可选/简洁。
+3. **固化 canonical id 长期稳定性**（`canonical_strategy_id` / `CanonicalStrategy` docstring）：
+   `author_id::slug(canonical_name)` 仅用于首次派生；作者新增作品时**不得从零重建已持久化
+   id**，正确流程是 reconciliation（persisted CanonicalStrategies + 新 RawStrategies →
+   匹配旧 canonical 或新建，旧 id 稳定）。reconciliation 系统本阶段未实现。
+
+### Data（重新生成输入产物，无 LLM 调用）
+- 新增的 support/evidence 上下文只增 input 估算，output 估算不变（仍 = `n_prepared × 60`）：
+  - Austen：**15,870 input** / 3,060 output（was ~13.1k / ~3.1k）；
+  - Dickens：**13,242 input** / 2,640 output（was ~11.0k / ~2.6k）。
+- raw 数量不变：Austen 51 / Dickens 44，精确去重折叠 0。
+
+### Tests
+- **158 passed**（was 151，+7）：prompt 含紧凑支持上下文与已验证引文、引文上限 2 条、
+  空 canonical name 拒绝、空 canonical description 拒绝、confidence 非数值类型拒绝、
+  confidence 越界（<0 / >1）拒绝、consolidate 把非法字段包装为 LLMResponseError。
+
+### Next step
+- Review 重新生成的三件产物，确认后放行付费 consolidation（单次/作者）。仍未调用任何 LLM。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

@@ -178,6 +178,27 @@ class StrategyConsolidator:
             return StrategyStatus.CANDIDATE.value
         return StrategyStatus.DISCOVERED.value
 
+    @staticmethod
+    def _verified_quotes(raw: RawStrategy, max_quotes: int = 2,
+                         max_chars: int = 80) -> list[str]:
+        """抽取至多 max_quotes 条**已验证**短引文（绝不发送全部证据，控制 token）。
+
+        优先取 `quotes`（已验证引文全集），退化为 `quote`（首条已验证）；每条截断到
+        max_chars 并压缩空白，去重。未验证引文（unverified_quotes）绝不进入提示词。
+        """
+        out: list[str] = []
+        for e in raw.evidence:
+            for q in (e.quotes or []) or ([e.quote] if e.quote else []):
+                t = " ".join(str(q).split())
+                if not t or t in out:
+                    continue
+                if len(t) > max_chars:
+                    t = t[: max_chars - 1].rstrip() + "…"
+                out.append(t)
+                if len(out) >= max_quotes:
+                    return out
+        return out
+
     # ------------------------------------------------------------------ #
     # 提示词
     # ------------------------------------------------------------------ #
@@ -208,12 +229,22 @@ class StrategyConsolidator:
         )
         lines = [f"AUTHOR: {author_id}", "", "RAW STRATEGIES:"]
         for r in raw_strategies:
-            lines.append(
+            n_chunks = len({e.chunk_id for e in r.evidence if e.chunk_id})
+            n_works = len({e.work_id for e in r.evidence if e.work_id})
+            status = self._support_status(n_works, n_chunks)
+            conf = f" confidence={r.confidence}" if r.confidence is not None else ""
+            quotes = self._verified_quotes(r)
+            block = (
                 f"- [{r.strategy_id}] {r.name}\n"
                 f"  description: {r.description}\n"
                 f"  trigger: {', '.join(r.triggers) or '(none)'}\n"
                 f"  operation: {', '.join(r.operations) or '(none)'}\n"
-                f"  effect: {', '.join(r.intended_effects) or '(none)'}")
+                f"  effect: {', '.join(r.intended_effects) or '(none)'}\n"
+                f"  support: chunks={n_chunks} works={n_works} status={status}{conf}"
+            )
+            if quotes:
+                block += "\n  evidence: " + " | ".join(f'"{q}"' for q in quotes)
+            lines.append(block)
         user = "\n".join(lines)
         return system, user
 
@@ -242,8 +273,14 @@ class StrategyConsolidator:
         groups_raw = data.get("groups", [])
         if not isinstance(groups_raw, list):
             raise LLMResponseError("consolidation 的 groups 必须是列表")
-        groups = [ConsolidationGroup.from_dict(g) for g in groups_raw
-                  if isinstance(g, dict)]
+        groups: list[ConsolidationGroup] = []
+        for g in groups_raw:
+            if not isinstance(g, dict):
+                continue
+            try:
+                groups.append(ConsolidationGroup.from_dict(g))
+            except ValueError as e:
+                raise LLMResponseError(f"consolidation 分组字段非法: {e}") from e
         self.validate_mapping([p.strategy_id for p in prepared], groups)
         raw_by_id = {p.strategy_id: p for p in prepared}
         return self.build_canonicals(raw_by_id, groups, author_id)

@@ -117,20 +117,17 @@ class CreativeStrategy:
 # 在**某位作者**名下收拢后的合并输入单元。
 # 层次二（canonical）：CanonicalStrategy 记录"作者级 consolidation 后该作者稳定
 # 使用的规范化创作策略"；通过 source_strategy_ids → evidence → chunk/work 完全可追溯。
-def _safe_confidence(value: Any) -> float | None:
-    """把 LLM 返回的 confidence 规范化为 [0,1] 浮点或 None（非数值/越界/布尔 → None）。"""
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    v = float(value)
-    return v if 0.0 <= v <= 1.0 else None
-
-
 def canonical_strategy_id(author_id: str, canonical_name: str) -> str:
     """作者范围内稳定的 canonical id：`author_id::slug(canonical_name)`。
 
     只从 canonical_name 派生 slug（小写、非字母数字转下划线），绝不依赖 description
     的自由文本 hash，因此描述措辞的微小变化不会改变 identity；两位作者可拥有同名
     canonical strategy 而 id 不冲突（`austen::dramatic_irony` vs `dickens::dramatic_irony`）。
+
+    长期稳定性（Phase 4.5.1 §3）：作者新增作品时**不得**从零重建已持久化的 canonical
+    id。正确流程是 reconciliation——用已有的 persisted CanonicalStrategies 去匹配新的
+    RawStrategies，能匹配则沿用旧 id，不能匹配才新建。本函数只负责首次派生；
+    reconciliation 系统本阶段尚未实现（见 devlog Phase 4.5）。
     """
     slug = re.sub(r"[^a-z0-9]+", "_", canonical_name.lower()).strip("_")
     return f"{author_id}::{slug or 'strategy'}"
@@ -213,18 +210,37 @@ class ConsolidationGroup:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ConsolidationGroup":
-        src = data.get("source_strategy_ids") or []
-        if isinstance(src, str):
-            src = [src]
+        """严格构造（spec Phase 4.5.1 §2）：缺失/非法必需字段显式抛 ValueError，
+        绝不静默把非法 confidence 转成 None。必需字段：canonical_name /
+        canonical_description 非空字符串、source_strategy_ids 非空字符串列表、
+        confidence 为 [0,1] 内数值（int/float，布尔除外）。"""
+        name = data.get("canonical_name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("canonical_name 必须是非空字符串")
+        desc = data.get("canonical_description")
+        if not isinstance(desc, str) or not desc.strip():
+            raise ValueError("canonical_description 必须是非空字符串")
+        src = data.get("source_strategy_ids")
+        if not isinstance(src, list):
+            raise ValueError("source_strategy_ids 必须是列表")
+        src_ids = [x for x in src if isinstance(x, str) and x.strip()]
+        if not src_ids:
+            raise ValueError("source_strategy_ids 必须是非空字符串列表")
+        conf = data.get("confidence")
+        if isinstance(conf, bool) or not isinstance(conf, (int, float)):
+            raise ValueError("confidence 必须是 [0,1] 内的数值（int/float）")
+        conf = float(conf)
+        if not 0.0 <= conf <= 1.0:
+            raise ValueError("confidence 必须在 [0,1] 内")
         return cls(
-            canonical_name=str(data.get("canonical_name", "")).strip(),
-            canonical_description=str(data.get("canonical_description", "")).strip(),
-            source_strategy_ids=[str(x) for x in src if isinstance(x, str)],
+            canonical_name=name.strip(),
+            canonical_description=desc.strip(),
+            source_strategy_ids=src_ids,
             trigger_summary=str(data.get("trigger_summary", "")),
             operation_summary=str(data.get("operation_summary", "")),
             effect_summary=str(data.get("effect_summary", "")),
             reasoning_summary=str(data.get("reasoning_summary", "")),
-            confidence=_safe_confidence(data.get("confidence")),
+            confidence=conf,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -247,6 +263,9 @@ class CanonicalStrategy:
     canonical_strategy_id = "{author_id}::{slug(canonical_name)}"，作者范围内稳定。
     通过 source_strategy_ids → evidence → chunk/work 完全可追溯；不同作者可拥有同名
     canonical strategy 而 id 不冲突。绝不删除/覆盖原始 raw strategies。
+
+    长期稳定性（Phase 4.5.1 §3）：作者新增作品时通过 reconciliation 复用已持久化的
+    canonical id（匹配旧 canonical 或新建），不重建。
     """
     canonical_strategy_id: str
     author_id: str

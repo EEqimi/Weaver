@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from knowledge.analysis.base import LLMResponseError
 from knowledge.providers.llm_provider import DummyLLMProvider
 from knowledge.schema.strategy_schema import (
     ConsolidationGroup, RawStrategy, StrategyEvidence, StrategyStatus,
@@ -163,3 +164,69 @@ def test_consolidate_rejects_cross_author_before_llm():
     c = StrategyConsolidator(DummyLLMProvider(response=json.dumps({"groups": []})))
     with pytest.raises(ConsolidationError):
         c.consolidate([_raw("a", author="austen"), _raw("b", author="dickens")], "austen")
+
+
+# ---- Phase 4.5.1 §1：prompt 含紧凑支持上下文 + 已验证引文 ----
+def test_prompt_includes_compact_support_and_verified_quotes():
+    ev = StrategyEvidence(
+        "c1", "w1", "austen", strategy_id="a",
+        quote="first verified", quotes=["first verified quote", "second verified quote"],
+        unverified_quotes=["unverified should not appear"], confidence=0.7)
+    raw = RawStrategy(
+        strategy_id="a", author_id="austen", name="Irony", description="d",
+        triggers=["t"], operations=["o"], intended_effects=["e"],
+        confidence=0.8, evidence=[ev])
+    _, user = StrategyConsolidator().build_prompt([raw], "austen")
+    assert "support: chunks=1 works=1 status=discovered confidence=0.8" in user
+    assert 'evidence: "first verified quote" | "second verified quote"' in user
+    assert "unverified should not appear" not in user
+
+
+def test_prompt_caps_verified_quotes_at_two():
+    ev = StrategyEvidence(
+        "c1", "w1", "austen", strategy_id="a",
+        quotes=["q1", "q2", "q3"], confidence=0.7)
+    raw = RawStrategy(
+        strategy_id="a", author_id="austen", name="Irony", description="d",
+        triggers=["t"], operations=["o"], intended_effects=["e"], evidence=[ev])
+    _, user = StrategyConsolidator().build_prompt([raw], "austen")
+    assert '"q1"' in user and '"q2"' in user
+    assert '"q3"' not in user
+
+
+# ---- Phase 4.5.1 §2：严格输出校验（非法必需字段显式报错，绝不静默）----
+def test_consolidation_group_rejects_empty_canonical_name():
+    with pytest.raises(ValueError):
+        ConsolidationGroup.from_dict({"canonical_name": "", "canonical_description": "d",
+                                      "source_strategy_ids": ["a"], "confidence": 0.5})
+
+
+def test_consolidation_group_rejects_empty_canonical_description():
+    with pytest.raises(ValueError):
+        ConsolidationGroup.from_dict({"canonical_name": "n", "canonical_description": "  ",
+                                      "source_strategy_ids": ["a"], "confidence": 0.5})
+
+
+def test_consolidation_group_rejects_invalid_confidence_type():
+    with pytest.raises(ValueError):
+        ConsolidationGroup.from_dict({"canonical_name": "n", "canonical_description": "d",
+                                      "source_strategy_ids": ["a"], "confidence": "0.8"})
+
+
+def test_consolidation_group_rejects_confidence_out_of_range():
+    with pytest.raises(ValueError):
+        ConsolidationGroup.from_dict({"canonical_name": "n", "canonical_description": "d",
+                                      "source_strategy_ids": ["a"], "confidence": -0.1})
+    with pytest.raises(ValueError):
+        ConsolidationGroup.from_dict({"canonical_name": "n", "canonical_description": "d",
+                                      "source_strategy_ids": ["a"], "confidence": 1.2})
+
+
+def test_consolidate_wraps_invalid_fields_as_llm_response_error():
+    resp = json.dumps({"groups": [{
+        "canonical_name": "Merged", "canonical_description": "d",
+        "source_strategy_ids": ["a", "b"], "confidence": "high",
+    }]})
+    c = StrategyConsolidator(DummyLLMProvider(response=resp))
+    with pytest.raises(LLMResponseError):
+        c.consolidate([_raw("a"), _raw("b")], "austen")

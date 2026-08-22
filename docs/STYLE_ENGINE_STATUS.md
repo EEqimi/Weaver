@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 4.5 (author-scoped Strategy Consolidation) — COMPLETE (infra + input artifacts; **no paid LLM**, stopped before review) |
-| **Last completed checkpoint** | Author-scoped consolidation infra: `RawStrategy`/`CanonicalStrategy` two-layer schema, `StrategyConsolidator` (author-scope isolation + structured-mapping validation), per-author `consolidation_input.json` (Austen 51 / Dickens 44 raw); 151 tests |
+| **Current phase** | Phase 4.5.1 (consolidation-quality fix) — COMPLETE (infra + input artifacts; **no paid LLM**, stopped before review) |
+| **Last completed checkpoint** | Phase 4.5.1: compact support/evidence context in the consolidation prompt, strict output validation (illegal fields raise, no silent None), canonical-ID stability documented; inputs regenerated (Austen ~15.9k in / Dickens ~13.2k in); 158 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -45,11 +45,14 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
-- **151 tests passed** (was 138). +13 Phase 4.5 tests: author-scope isolation,
+- **158 tests passed** (was 151). +13 Phase 4.5 tests: author-scope isolation,
   missing-author rejection, complete source coverage, duplicate-assignment /
   hallucinated / missing source-id rejection, canonical provenance
   (raw→chunk→work→evidence), cross-author same-name ids, canonical-id stability,
   exact-dup fold, no name-similarity merge, dummy end-to-end consolidate.
+  +7 Phase 4.5.1 tests: prompt support/evidence context, 2-quote cap, empty-name /
+  empty-description rejection, non-numeric confidence rejection, confidence
+  out-of-range (<0 / >1) rejection, LLMResponseError wrap on invalid fields.
 
 ## Latest experiment results (deterministic, no LLM)
 - Layer A: 2,328 TRAIN chunks × 22 features.
@@ -101,8 +104,10 @@ Short current-state snapshot (≈1–2 min read). History lives in
   registry; 20 strategies appear in both authors → partitioned, never merged).
 - Exact-duplicate fold: 0 (near-duplicates differ in description due to the discover
   hash suffix — the LLM semantic merge is what collapses them).
-- Estimates (single-shot, DeepSeek `deepseek-chat`): Austen 1 req ~13.1k in / ~3.1k out;
-  Dickens 1 req ~11.0k in / ~2.6k out. No existing consolidation cache.
+- Estimates (single-shot, DeepSeek `deepseek-chat`): Austen 1 req ~15.9k in / ~3.1k out;
+  Dickens 1 req ~13.2k in / ~2.6k out. No existing consolidation cache.
+  (Phase 4.5.1 added per-strategy `support:` + ≤2 verified evidence quotes — input
+  grew ~2–3k/author; output unchanged.)
 - Artifacts: `data/analysis/consolidation/{austen,dickens}_consolidation_input.json`,
   `consolidation_summary.json`.
 
@@ -116,7 +121,7 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - `candidate_core` 特征仍不得晋升（校准仅标定样本，不足以晋升）。
 
 ## Next planned action
-- Review the consolidation input artifacts; on approval, run the paid author-scoped
-  consolidation (1 request per author, DeepSeek `deepseek-chat`, ~13k+3k Austen /
-  ~11k+3k Dickens est. tokens), then build canonical author strategy sets → Phase 5
-  synthesis.
+- Review the regenerated consolidation input artifacts; on approval, run the paid
+  author-scoped consolidation (1 request per author, DeepSeek `deepseek-chat`,
+  ~15.9k+3.1k Austen / ~13.2k+2.6k Dickens est. tokens), then build canonical author
+  strategy sets → Phase 5 synthesis.
