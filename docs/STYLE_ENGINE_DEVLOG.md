@@ -713,6 +713,44 @@ trigger/operation/effect 措辞不同而被登记为多个 Strategy。本阶段�
 
 ---
 
+## Checkpoint — Phase 4.5 (run): Author-scoped paid consolidation（真实 LLM 执行）
+
+**Status:** COMPLETE
+
+### Goal
+放行付费 consolidation：对两位作者执行真实 `deepseek-chat` 请求，产出作者级 canonical
+strategy 集合，完成 Phase 4.5 的落地产物（复用 Phase 4.4 注册表，绝不重跑 analyzer）。
+
+### Result
+- Austen：**51 raw → 26 canonical**（validated 7 / candidate 2 / discovered 17）。
+- Dickens：**44 raw → 36 canonical**（validated 12 / candidate 5 / discovered 19）。
+- 覆盖完整：Austen 51 / Dickens 44 个 raw id 全部映射，无遗漏、无幻觉、无重复。
+- 产物：`data/analysis/consolidation/{austen,dickens}_canonical_strategies.json` +
+  `consolidation_results.json` + `consolidation_report.md`。
+
+### Bugs found & fixed（执行中暴露，均加回归测试）
+1. **max_tokens 截断**：provider 默认 `max_tokens=2048` 把两份 consolidation JSON 截断
+   （输出需 ~3k+ token）。修复：`StrategyConsolidator(max_tokens=8192)`，并把 `max_tokens`
+   纳入 cache key（`extra`），避免同 prompt 不同上限互相污染缓存。
+2. **LLM 覆盖遗漏**：Austen 首轮漏掉 2/51 个 raw id（`characterization_via_possessions`、
+   `narrative_irony_through_free_indirect_discourse`）。修复：确定性覆盖修复 pass
+   （`repair()` + `_merge_repair()`）——仅对遗漏 id 二次请求，按 canonical_name 精确
+   匹配 merge 进已有组或新建组，再复验。修复后前者并入
+   `austen::free_indirect_discourse_for_psychological_depth`，后者新建
+   `austen::characterization_through_possessions`。
+
+### Token / cost
+- 最终运行计量（报告内）：1 次修复请求 + 2 次缓存命中，1690 in / 500 out。
+- 含两次调试运行（截断 + 遗漏修复）实际累计 ~68k token（输入 ~50.3k / 输出 ~18.0k）。
+
+### Tests
+- **161 passed**（was 158，+3：max_tokens 透传、repair 并入已有组、repair 新建组）。
+
+### Next step
+- Canonical 作者策略集已就绪 → 进入 Phase 5（作者画像合成）。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

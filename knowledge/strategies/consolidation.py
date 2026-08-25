@@ -44,9 +44,13 @@ def _normalize(text: str) -> str:
 class StrategyConsolidator:
     """作者级策略合并器：确定性预处理 + 结构化 LLM 映射 + 校验 + canonical 构建。"""
 
-    def __init__(self, provider: LLMProvider | None = None, blind: bool = True):
+    def __init__(self, provider: LLMProvider | None = None, blind: bool = True,
+                 max_tokens: int = 8192):
         self._provider = provider
         self.blind = blind
+        # consolidation 输出比单次 analyzer 长（一次产出多组 canonical 描述）；
+        # provider 默认 2048 会把 JSON 截断，这里显式放宽到 deepseek-chat 输出上限。
+        self.max_tokens = max_tokens
 
     # ------------------------------------------------------------------ #
     # 确定性预处理（只做低风险归一，不替代 LLM 语义合并）
@@ -202,6 +206,25 @@ class StrategyConsolidator:
     # ------------------------------------------------------------------ #
     # 提示词
     # ------------------------------------------------------------------ #
+    def _strategy_block(self, r: RawStrategy) -> str:
+        """单个 raw strategy 的紧凑定义 + 支持/证据块（build_prompt 与 repair 共用）。"""
+        n_chunks = len({e.chunk_id for e in r.evidence if e.chunk_id})
+        n_works = len({e.work_id for e in r.evidence if e.work_id})
+        status = self._support_status(n_works, n_chunks)
+        conf = f" confidence={r.confidence}" if r.confidence is not None else ""
+        quotes = self._verified_quotes(r)
+        block = (
+            f"- [{r.strategy_id}] {r.name}\n"
+            f"  description: {r.description}\n"
+            f"  trigger: {', '.join(r.triggers) or '(none)'}\n"
+            f"  operation: {', '.join(r.operations) or '(none)'}\n"
+            f"  effect: {', '.join(r.intended_effects) or '(none)'}\n"
+            f"  support: chunks={n_chunks} works={n_works} status={status}{conf}"
+        )
+        if quotes:
+            block += "\n  evidence: " + " | ".join(f'"{q}"' for q in quotes)
+        return block
+
     def build_prompt(self, raw_strategies: list[RawStrategy],
                      author_id: str) -> tuple[str, str]:
         system = (
@@ -229,24 +252,96 @@ class StrategyConsolidator:
         )
         lines = [f"AUTHOR: {author_id}", "", "RAW STRATEGIES:"]
         for r in raw_strategies:
-            n_chunks = len({e.chunk_id for e in r.evidence if e.chunk_id})
-            n_works = len({e.work_id for e in r.evidence if e.work_id})
-            status = self._support_status(n_works, n_chunks)
-            conf = f" confidence={r.confidence}" if r.confidence is not None else ""
-            quotes = self._verified_quotes(r)
-            block = (
-                f"- [{r.strategy_id}] {r.name}\n"
-                f"  description: {r.description}\n"
-                f"  trigger: {', '.join(r.triggers) or '(none)'}\n"
-                f"  operation: {', '.join(r.operations) or '(none)'}\n"
-                f"  effect: {', '.join(r.intended_effects) or '(none)'}\n"
-                f"  support: chunks={n_chunks} works={n_works} status={status}{conf}"
-            )
-            if quotes:
-                block += "\n  evidence: " + " | ".join(f'"{q}"' for q in quotes)
-            lines.append(block)
+            lines.append(self._strategy_block(r))
         user = "\n".join(lines)
         return system, user
+
+    # ------------------------------------------------------------------ #
+    # 覆盖修复：首轮遗漏的 raw 策略（merge 进已有 canonical 或新建）
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _parse_groups(groups_raw: list[Any]) -> list[ConsolidationGroup]:
+        groups: list[ConsolidationGroup] = []
+        for g in groups_raw:
+            if not isinstance(g, dict):
+                continue
+            try:
+                groups.append(ConsolidationGroup.from_dict(g))
+            except ValueError as e:
+                raise LLMResponseError(f"consolidation 分组字段非法: {e}") from e
+        return groups
+
+    @staticmethod
+    def _missing_ids(input_ids: list[str],
+                     groups: list[ConsolidationGroup]) -> list[str]:
+        placed = {sid for g in groups for sid in g.source_strategy_ids}
+        return [sid for sid in input_ids if sid not in placed]
+
+    def repair(self, existing_groups: list[ConsolidationGroup],
+               raw_by_id: dict[str, RawStrategy], missing_ids: list[str],
+               author_id: str) -> list[ConsolidationGroup]:
+        """对首轮遗漏的 raw 策略做一次针对性合并（merge 进已有组或新建组）。
+
+        只处理 missing_ids，输出仅覆盖这些 id 的分组：canonical_name 精确匹配某个
+        已有组的名字=并入，否则=新建组。绝不改数据、绝不重复首轮已正确分组的 id。
+        """
+        missing_raws = [raw_by_id[i] for i in missing_ids]
+        system = (
+            "You are completing a literary strategy consolidation. A first pass "
+            "grouped most of a SINGLE author's raw writing strategies into "
+            "canonical strategies, but a few were omitted. For each omitted raw "
+            "strategy, decide whether it belongs to an EXISTING canonical group "
+            "(same mechanism: trigger/operation/effect) or needs a NEW group.\n"
+            "Return ONLY a JSON object:\n"
+            '{"groups": [{"canonical_name": "...", "canonical_description": "...", '
+            '"source_strategy_ids": ["..."], "trigger_summary": "...", '
+            '"operation_summary": "...", "effect_summary": "...", '
+            '"reasoning_summary": "...", "confidence": 0.0}]}\n'
+            "To merge into an existing group, set canonical_name to EXACTLY that "
+            "group's name (copy it verbatim) and list the omitted id(s) in "
+            "source_strategy_ids. To create a new group, give a new canonical_name. "
+            "Every omitted raw strategy id must appear in EXACTLY one group."
+        )
+        lines = [f"AUTHOR: {author_id}", "", "EXISTING CANONICAL GROUPS:"]
+        for g in existing_groups:
+            lines.append(f"- {g.canonical_name} (ids: {', '.join(g.source_strategy_ids)})")
+        lines += ["", "OMITTED RAW STRATEGIES:"]
+        for r in missing_raws:
+            lines.append(self._strategy_block(r))
+        user = "\n".join(lines)
+
+        key = cache_key(
+            text=user, analyzer_id=ANALYZER_ID, analyzer_version=ANALYZER_VERSION,
+            schema_version=CANONICAL_STRATEGY_SCHEMA_VERSION,
+            model=self._provider.model, provider_id=self._provider.provider_id,
+            prompt_name=f"strategy_consolidation_repair:blind={self.blind}:author={author_id}",
+            extra={"max_tokens": self.max_tokens},
+        )
+        raw_text = self._provider.complete(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            cache_hint=key, max_tokens=self.max_tokens)
+        data = parse_json_response(raw_text)
+        groups_raw = data.get("groups", [])
+        if not isinstance(groups_raw, list):
+            raise LLMResponseError("repair 的 groups 必须是列表")
+        return self._parse_groups(groups_raw)
+
+    @staticmethod
+    def _merge_repair(existing_groups: list[ConsolidationGroup],
+                      repair_groups: list[ConsolidationGroup]) -> list[ConsolidationGroup]:
+        """把修复分组并入首轮结果：canonical_name 精确匹配 → 合并 source ids；否则新建。"""
+        merged = list(existing_groups)
+        by_name: dict[str, ConsolidationGroup] = {
+            _normalize(g.canonical_name).lower(): g for g in merged}
+        for rg in repair_groups:
+            target = by_name.get(_normalize(rg.canonical_name).lower())
+            if target is not None:
+                target.source_strategy_ids.extend(rg.source_strategy_ids)
+            else:
+                merged.append(rg)
+                by_name[_normalize(rg.canonical_name).lower()] = rg
+        return merged
 
     # ------------------------------------------------------------------ #
     # 全流程（真正调用 LLM 之前，请先 review 输入产物与估算）
@@ -265,22 +360,27 @@ class StrategyConsolidator:
             schema_version=CANONICAL_STRATEGY_SCHEMA_VERSION,
             model=self._provider.model, provider_id=self._provider.provider_id,
             prompt_name=f"strategy_consolidation:blind={self.blind}:author={author_id}",
+            extra={"max_tokens": self.max_tokens},
         )
         raw_text = self._provider.complete(
             [{"role": "system", "content": system},
-             {"role": "user", "content": user}], cache_hint=key)
+             {"role": "user", "content": user}],
+            cache_hint=key, max_tokens=self.max_tokens)
         data = parse_json_response(raw_text)
         groups_raw = data.get("groups", [])
         if not isinstance(groups_raw, list):
             raise LLMResponseError("consolidation 的 groups 必须是列表")
-        groups: list[ConsolidationGroup] = []
-        for g in groups_raw:
-            if not isinstance(g, dict):
-                continue
-            try:
-                groups.append(ConsolidationGroup.from_dict(g))
-            except ValueError as e:
-                raise LLMResponseError(f"consolidation 分组字段非法: {e}") from e
-        self.validate_mapping([p.strategy_id for p in prepared], groups)
+        groups = self._parse_groups(groups_raw)
+        prepared_ids = [p.strategy_id for p in prepared]
         raw_by_id = {p.strategy_id: p for p in prepared}
+        try:
+            self.validate_mapping(prepared_ids, groups)
+        except ConsolidationError:
+            missing = self._missing_ids(prepared_ids, groups)
+            if not missing:
+                # 幻觉 id / 重复赋值等非"覆盖缺失"问题：修复无意义，直接上抛
+                raise
+            repair_groups = self.repair(groups, raw_by_id, missing, author_id)
+            groups = self._merge_repair(groups, repair_groups)
+            self.validate_mapping(prepared_ids, groups)  # 修复后必须完整
         return self.build_canonicals(raw_by_id, groups, author_id)

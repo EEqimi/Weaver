@@ -230,3 +230,72 @@ def test_consolidate_wraps_invalid_fields_as_llm_response_error():
     c = StrategyConsolidator(DummyLLMProvider(response=resp))
     with pytest.raises(LLMResponseError):
         c.consolidate([_raw("a"), _raw("b")], "austen")
+
+
+# ---- Phase 4.5.1（追加）：consolidation 输出需放宽 max_tokens，防止 JSON 截断 ----
+def test_consolidate_passes_max_tokens_to_provider():
+    class SpyProvider:
+        provider_id = "spy"
+        model = "spy-model"
+
+        def __init__(self):
+            self.kwargs = None
+
+        def is_configured(self):
+            return True
+
+        def complete(self, messages, **kwargs):
+            self.kwargs = kwargs
+            return json.dumps({"groups": [{
+                "canonical_name": "M", "canonical_description": "d",
+                "source_strategy_ids": ["a"], "confidence": 0.5,
+            }]})
+
+    spy = SpyProvider()
+    StrategyConsolidator(spy, max_tokens=6000).consolidate([_raw("a")], "austen")
+    assert spy.kwargs.get("max_tokens") == 6000
+
+
+# ---- Phase 4.5.1（追加）：首轮遗漏 → 覆盖修复（merge 进已有组 / 新建组）----
+class _ScriptedProvider:
+    """按顺序返回预设响应，验证 repair 二次调用路径。"""
+    provider_id = "scripted"
+    model = "m"
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self._i = 0
+
+    def is_configured(self):
+        return True
+
+    def complete(self, messages, **kwargs):
+        r = self._responses[self._i]
+        self._i += 1
+        return r
+
+
+def test_consolidate_repairs_missing_source_id_into_existing_group():
+    first = json.dumps({"groups": [{
+        "canonical_name": "Merged", "canonical_description": "d",
+        "source_strategy_ids": ["a"], "confidence": 0.8}]})
+    repair = json.dumps({"groups": [{
+        "canonical_name": "Merged", "canonical_description": "d",
+        "source_strategy_ids": ["b"], "confidence": 0.7}]})
+    c = StrategyConsolidator(_ScriptedProvider([first, repair]))
+    canonicals = c.consolidate([_raw("a"), _raw("b")], "austen")
+    assert len(canonicals) == 1
+    assert set(canonicals[0].source_strategy_ids) == {"a", "b"}
+
+
+def test_consolidate_repair_can_create_new_group():
+    first = json.dumps({"groups": [{
+        "canonical_name": "A", "canonical_description": "d",
+        "source_strategy_ids": ["a"], "confidence": 0.8}]})
+    repair = json.dumps({"groups": [{
+        "canonical_name": "B", "canonical_description": "d",
+        "source_strategy_ids": ["b"], "confidence": 0.7}]})
+    c = StrategyConsolidator(_ScriptedProvider([first, repair]))
+    canonicals = c.consolidate([_raw("a"), _raw("b")], "austen")
+    assert len(canonicals) == 2
+    assert {cs.canonical_strategy_id for cs in canonicals} == {"austen::a", "austen::b"}
