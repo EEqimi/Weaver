@@ -304,6 +304,18 @@ def test_repair_merge_ignores_paraphrased_name():
     assert set(canonicals[0].source_strategy_ids) == {"a", "b"}
 
 
+def test_repair_rejects_hallucinated_target_id():
+    first = json.dumps({"groups": [{
+        "canonical_name": "A", "canonical_description": "d",
+        "source_strategy_ids": ["a"], "confidence": 0.8}]})
+    repair = json.dumps({"assignments": [
+        {"source_strategy_ids": ["b"], "action": "merge_existing",
+         "target_canonical_id": "austen::nonexistent"}]})
+    c = StrategyConsolidator(_ScriptedProvider([first, repair]))
+    with pytest.raises(ConsolidationError):
+        c.consolidate([_raw("a"), _raw("b")], "austen")
+
+
 def test_repair_create_new_group():
     first = json.dumps({"groups": [{
         "canonical_name": "A", "canonical_description": "d",

@@ -780,9 +780,10 @@ strategy 集合，完成 Phase 4.5 的落地产物（复用 Phase 4.4 注册表�
   已有的 Austen/Dickens 首轮合并缓存（内容寻址本已区分，显式版本为双保险）。
 
 ### Tests
-- **166 passed**（was 161）：新增/改写 7 个 repair 稳健性测试（merge_by_id、paraphrase
-  不新建、create_new、重复分配拒绝、遗漏未覆盖拒绝、幻觉 raw id 拒绝、跨作者 target 拒绝）；
-  首轮合并行为不变由既有 `test_consolidate_end_to_end_with_dummy_provider` 覆盖。
+- **167 passed**（was 161）：新增/改写 8 个 repair 稳健性测试（merge_by_id、paraphrase
+  不新建、create_new、幻觉 target id 拒绝、重复分配拒绝、遗漏未覆盖拒绝、幻觉 raw id 拒绝、
+  跨作者 target 拒绝）；首轮合并行为不变由既有
+  `test_consolidate_end_to_end_with_dummy_provider` 覆盖。
 
 ### Non-goals（本次明确不做）
 - 未重跑 Austen/Dickens consolidation；未调用真实 LLM（测试全确定性）；未改动任何
