@@ -275,27 +275,97 @@ class _ScriptedProvider:
         return r
 
 
-def test_consolidate_repairs_missing_source_id_into_existing_group():
+def test_repair_merge_existing_by_canonical_id():
     first = json.dumps({"groups": [{
         "canonical_name": "Merged", "canonical_description": "d",
         "source_strategy_ids": ["a"], "confidence": 0.8}]})
-    repair = json.dumps({"groups": [{
-        "canonical_name": "Merged", "canonical_description": "d",
-        "source_strategy_ids": ["b"], "confidence": 0.7}]})
+    repair = json.dumps({"assignments": [{
+        "source_strategy_ids": ["b"], "action": "merge_existing",
+        "target_canonical_id": "austen::merged"}]})
     c = StrategyConsolidator(_ScriptedProvider([first, repair]))
-    canonicals = c.consolidate([_raw("a"), _raw("b")], "austen")
+    canonicals = c.consolidate([_raw("a", name="Merged"), _raw("b")], "austen")
     assert len(canonicals) == 1
     assert set(canonicals[0].source_strategy_ids) == {"a", "b"}
 
 
-def test_consolidate_repair_can_create_new_group():
+def test_repair_merge_ignores_paraphrased_name():
+    # 即使 repair 返回了被 paraphrase 的 canonical_name，也按 id 并入，绝不新建 canonical。
+    first = json.dumps({"groups": [{
+        "canonical_name": "Free Indirect Discourse", "canonical_description": "d",
+        "source_strategy_ids": ["a"], "confidence": 0.8}]})
+    repair = json.dumps({"assignments": [{
+        "source_strategy_ids": ["b"], "action": "merge_existing",
+        "target_canonical_id": "austen::free_indirect_discourse",
+        "canonical_name": "Some Paraphrased Label"}]})
+    c = StrategyConsolidator(_ScriptedProvider([first, repair]))
+    canonicals = c.consolidate(
+        [_raw("a", name="Free Indirect Discourse"), _raw("b")], "austen")
+    assert len(canonicals) == 1
+    assert set(canonicals[0].source_strategy_ids) == {"a", "b"}
+
+
+def test_repair_create_new_group():
     first = json.dumps({"groups": [{
         "canonical_name": "A", "canonical_description": "d",
         "source_strategy_ids": ["a"], "confidence": 0.8}]})
-    repair = json.dumps({"groups": [{
-        "canonical_name": "B", "canonical_description": "d",
-        "source_strategy_ids": ["b"], "confidence": 0.7}]})
+    repair = json.dumps({"assignments": [{
+        "source_strategy_ids": ["b"], "action": "create_new",
+        "canonical_name": "B", "canonical_description": "new",
+        "confidence": 0.7}]})
     c = StrategyConsolidator(_ScriptedProvider([first, repair]))
     canonicals = c.consolidate([_raw("a"), _raw("b")], "austen")
     assert len(canonicals) == 2
     assert {cs.canonical_strategy_id for cs in canonicals} == {"austen::a", "austen::b"}
+
+
+def test_repair_rejects_duplicate_assignment():
+    first = json.dumps({"groups": [{
+        "canonical_name": "A", "canonical_description": "d",
+        "source_strategy_ids": ["a"], "confidence": 0.8}]})
+    repair = json.dumps({"assignments": [
+        {"source_strategy_ids": ["b"], "action": "create_new",
+         "canonical_name": "B", "canonical_description": "d", "confidence": 0.7},
+        {"source_strategy_ids": ["b"], "action": "create_new",
+         "canonical_name": "C", "canonical_description": "d", "confidence": 0.7},
+    ]})
+    c = StrategyConsolidator(_ScriptedProvider([first, repair]))
+    with pytest.raises(ConsolidationError):
+        c.consolidate([_raw("a"), _raw("b")], "austen")
+
+
+def test_repair_rejects_incomplete_coverage():
+    first = json.dumps({"groups": [{
+        "canonical_name": "A", "canonical_description": "d",
+        "source_strategy_ids": ["a"], "confidence": 0.8}]})
+    repair = json.dumps({"assignments": [
+        {"source_strategy_ids": ["b"], "action": "create_new",
+         "canonical_name": "B", "canonical_description": "d", "confidence": 0.7},
+    ]})  # "c" 被遗漏
+    c = StrategyConsolidator(_ScriptedProvider([first, repair]))
+    with pytest.raises(ConsolidationError):
+        c.consolidate([_raw("a"), _raw("b"), _raw("c")], "austen")
+
+
+def test_repair_rejects_hallucinated_raw_id():
+    first = json.dumps({"groups": [{
+        "canonical_name": "A", "canonical_description": "d",
+        "source_strategy_ids": ["a"], "confidence": 0.8}]})
+    repair = json.dumps({"assignments": [
+        {"source_strategy_ids": ["b", "ghost_id"], "action": "create_new",
+         "canonical_name": "B", "canonical_description": "d", "confidence": 0.7},
+    ]})
+    c = StrategyConsolidator(_ScriptedProvider([first, repair]))
+    with pytest.raises(ConsolidationError):
+        c.consolidate([_raw("a"), _raw("b")], "austen")
+
+
+def test_repair_rejects_cross_author_target():
+    first = json.dumps({"groups": [{
+        "canonical_name": "A", "canonical_description": "d",
+        "source_strategy_ids": ["a"], "confidence": 0.8}]})
+    repair = json.dumps({"assignments": [
+        {"source_strategy_ids": ["b"], "action": "merge_existing",
+         "target_canonical_id": "dickens::a"}]})
+    c = StrategyConsolidator(_ScriptedProvider([first, repair]))
+    with pytest.raises(ConsolidationError):
+        c.consolidate([_raw("a"), _raw("b")], "austen")

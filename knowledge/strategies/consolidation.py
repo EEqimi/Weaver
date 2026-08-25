@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 from ..analysis.base import LLMNotConfiguredError, LLMResponseError, parse_json_response
@@ -31,6 +32,11 @@ from ..schema.versions import (
 ANALYZER_ID = "StrategyConsolidator"
 ANALYZER_VERSION = STRATEGY_CONSOLIDATOR_VERSION
 
+# repair 阶段专用契约版本：首轮合并（build_prompt）契约不变，但 repair 从「按
+# canonical_name 匹配」升级为「按 canonical_strategy_id 匹配 + merge_existing /
+# create_new 显式动作」。该版本只进入 repair 的 cache key，绝不污染首次合并缓存。
+REPAIR_CONTRACT_VERSION = "2.0"
+
 
 class ConsolidationError(ValueError):
     """consolidation 校验失败（作者越界 / 覆盖缺失 / 幻觉 / 重复赋值 / 缺 provider）。"""
@@ -39,6 +45,66 @@ class ConsolidationError(ValueError):
 def _normalize(text: str) -> str:
     """低风险归一：NFC + 空白折叠（用于 name/description/trigger/operation/effect）。"""
     return " ".join(unicodedata.normalize("NFC", text or "").split())
+
+
+@dataclass
+class RepairAssignment:
+    """repair 阶段对遗漏 raw 策略的一次处理指令（显式区分 merge / create）。
+
+    - `merge_existing`：只带 `target_canonical_id`（指向某已有 canonical 的稳定 id）。
+      绝不依赖返回的 name 做匹配——name 只是给人看的标签，paraphrase 不会新建 canonical。
+    - `create_new`：带完整 canonical 定义（等价于一个 ConsolidationGroup），用于构建新组。
+    """
+    action: str                       # "merge_existing" | "create_new"
+    source_strategy_ids: list[str]
+    target_canonical_id: str = ""             # merge_existing 时
+    canonical_name: str = ""                   # create_new 时
+    canonical_description: str = ""
+    trigger_summary: str = ""
+    operation_summary: str = ""
+    effect_summary: str = ""
+    reasoning_summary: str = ""
+    confidence: float | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RepairAssignment":
+        action = str(data.get("action", "")).strip().lower()
+        if action not in ("merge_existing", "create_new"):
+            raise ValueError("action 必须是 merge_existing 或 create_new")
+        src = data.get("source_strategy_ids")
+        if not isinstance(src, list):
+            raise ValueError("source_strategy_ids 必须是列表")
+        src_ids = [x for x in src if isinstance(x, str) and x.strip()]
+        if not src_ids:
+            raise ValueError("source_strategy_ids 必须是非空字符串列表")
+        if action == "merge_existing":
+            target = data.get("target_canonical_id")
+            if not isinstance(target, str) or not target.strip():
+                raise ValueError("merge_existing 必须提供 target_canonical_id")
+            return cls(action=action, source_strategy_ids=src_ids,
+                       target_canonical_id=target.strip())
+        # create_new
+        name = data.get("canonical_name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("create_new 必须提供 canonical_name")
+        desc = data.get("canonical_description")
+        if not isinstance(desc, str) or not desc.strip():
+            raise ValueError("create_new 必须提供 canonical_description")
+        conf = data.get("confidence")
+        if isinstance(conf, bool) or not isinstance(conf, (int, float)):
+            raise ValueError("confidence 必须是 [0,1] 内的数值（int/float）")
+        conf = float(conf)
+        if not 0.0 <= conf <= 1.0:
+            raise ValueError("confidence 必须在 [0,1] 内")
+        return cls(
+            action=action, source_strategy_ids=src_ids,
+            canonical_name=name.strip(), canonical_description=desc.strip(),
+            trigger_summary=str(data.get("trigger_summary") or ""),
+            operation_summary=str(data.get("operation_summary") or ""),
+            effect_summary=str(data.get("effect_summary") or ""),
+            reasoning_summary=str(data.get("reasoning_summary") or ""),
+            confidence=conf,
+        )
 
 
 class StrategyConsolidator:
@@ -277,34 +343,70 @@ class StrategyConsolidator:
         placed = {sid for g in groups for sid in g.source_strategy_ids}
         return [sid for sid in input_ids if sid not in placed]
 
+    @staticmethod
+    def _parse_assignments(assignments_raw: list[Any]) -> list[RepairAssignment]:
+        out: list[RepairAssignment] = []
+        for a in assignments_raw:
+            if not isinstance(a, dict):
+                continue
+            try:
+                out.append(RepairAssignment.from_dict(a))
+            except ValueError as e:
+                raise LLMResponseError(f"repair assignment 字段非法: {e}") from e
+        return out
+
+    def _existing_group_block(self, cid: str, g: ConsolidationGroup) -> str:
+        """已有 canonical 的紧凑描述，暴露稳定 id（merge 目标由 id 引用，绝不按 name）。"""
+        return (
+            f"- canonical_strategy_id: {cid}\n"
+            f"  name: {g.canonical_name}\n"
+            f"  description: {g.canonical_description}\n"
+            f"  trigger: {g.trigger_summary or '(none)'}\n"
+            f"  operation: {g.operation_summary or '(none)'}\n"
+            f"  effect: {g.effect_summary or '(none)'}"
+        )
+
     def repair(self, existing_groups: list[ConsolidationGroup],
                raw_by_id: dict[str, RawStrategy], missing_ids: list[str],
-               author_id: str) -> list[ConsolidationGroup]:
-        """对首轮遗漏的 raw 策略做一次针对性合并（merge 进已有组或新建组）。
+               author_id: str) -> list[RepairAssignment]:
+        """对首轮遗漏的 raw 策略做一次针对性处理（显式 merge_existing / create_new）。
 
-        只处理 missing_ids，输出仅覆盖这些 id 的分组：canonical_name 精确匹配某个
-        已有组的名字=并入，否则=新建组。绝不改数据、绝不重复首轮已正确分组的 id。
+        只处理 missing_ids。merge 目标用**稳定 canonical_strategy_id** 引用（绝不用
+        name 匹配）；create_new 才带完整 canonical 定义。绝不改数据、绝不重复首轮已
+        正确分组的 id。
         """
         missing_raws = [raw_by_id[i] for i in missing_ids]
+        existing = [(canonical_strategy_id(author_id, g.canonical_name), g)
+                    for g in existing_groups]
         system = (
             "You are completing a literary strategy consolidation. A first pass "
             "grouped most of a SINGLE author's raw writing strategies into "
             "canonical strategies, but a few were omitted. For each omitted raw "
-            "strategy, decide whether it belongs to an EXISTING canonical group "
-            "(same mechanism: trigger/operation/effect) or needs a NEW group.\n"
-            "Return ONLY a JSON object:\n"
-            '{"groups": [{"canonical_name": "...", "canonical_description": "...", '
-            '"source_strategy_ids": ["..."], "trigger_summary": "...", '
-            '"operation_summary": "...", "effect_summary": "...", '
-            '"reasoning_summary": "...", "confidence": 0.0}]}\n'
-            "To merge into an existing group, set canonical_name to EXACTLY that "
-            "group's name (copy it verbatim) and list the omitted id(s) in "
-            "source_strategy_ids. To create a new group, give a new canonical_name. "
-            "Every omitted raw strategy id must appear in EXACTLY one group."
+            "strategy, decide whether it belongs to an EXISTING canonical strategy "
+            "(same mechanism: trigger/operation/effect) or needs a NEW canonical "
+            "strategy.\n"
+            "Return ONLY a JSON object with an 'assignments' array:\n"
+            '{"assignments": [\n'
+            '  {"source_strategy_ids": ["..."], "action": "merge_existing", '
+            '"target_canonical_id": "..."},\n'
+            '  {"source_strategy_ids": ["..."], "action": "create_new", '
+            '"canonical_name": "...", "canonical_description": "...", '
+            '"trigger_summary": "...", "operation_summary": "...", '
+            '"effect_summary": "...", "reasoning_summary": "...", "confidence": 0.0}\n'
+            "]}\n"
+            "- action is exactly 'merge_existing' or 'create_new'.\n"
+            "- merge_existing: set target_canonical_id to the EXACT "
+            "canonical_strategy_id of the existing canonical strategy to merge into "
+            "(copy the id verbatim; do NOT paraphrase it; do NOT set canonical_name).\n"
+            "- create_new: provide canonical_name, canonical_description, "
+            "trigger_summary, operation_summary, effect_summary, reasoning_summary, "
+            "confidence.\n"
+            "Every omitted raw strategy id must appear in EXACTLY one assignment."
         )
-        lines = [f"AUTHOR: {author_id}", "", "EXISTING CANONICAL GROUPS:"]
-        for g in existing_groups:
-            lines.append(f"- {g.canonical_name} (ids: {', '.join(g.source_strategy_ids)})")
+        lines = [f"AUTHOR: {author_id}", "",
+                 "EXISTING CANONICAL STRATEGIES (reference by canonical_strategy_id):"]
+        for cid, g in existing:
+            lines.append(self._existing_group_block(cid, g))
         lines += ["", "OMITTED RAW STRATEGIES:"]
         for r in missing_raws:
             lines.append(self._strategy_block(r))
@@ -315,32 +417,65 @@ class StrategyConsolidator:
             schema_version=CANONICAL_STRATEGY_SCHEMA_VERSION,
             model=self._provider.model, provider_id=self._provider.provider_id,
             prompt_name=f"strategy_consolidation_repair:blind={self.blind}:author={author_id}",
-            extra={"max_tokens": self.max_tokens},
+            extra={"max_tokens": self.max_tokens,
+                   "repair_contract_version": REPAIR_CONTRACT_VERSION},
         )
         raw_text = self._provider.complete(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
             cache_hint=key, max_tokens=self.max_tokens)
         data = parse_json_response(raw_text)
-        groups_raw = data.get("groups", [])
-        if not isinstance(groups_raw, list):
-            raise LLMResponseError("repair 的 groups 必须是列表")
-        return self._parse_groups(groups_raw)
+        assignments_raw = data.get("assignments", [])
+        if not isinstance(assignments_raw, list):
+            raise LLMResponseError("repair 的 assignments 必须是列表")
+        return self._parse_assignments(assignments_raw)
 
     @staticmethod
-    def _merge_repair(existing_groups: list[ConsolidationGroup],
-                      repair_groups: list[ConsolidationGroup]) -> list[ConsolidationGroup]:
-        """把修复分组并入首轮结果：canonical_name 精确匹配 → 合并 source ids；否则新建。"""
+    def _apply_repair(existing_groups: list[ConsolidationGroup],
+                      assignments: list[RepairAssignment], author_id: str,
+                      missing_ids: list[str]) -> list[ConsolidationGroup]:
+        """按 canonical_strategy_id 应用修复（先校验再改动，失败即抛，不改已通过结果）。
+
+        校验规则（全部确定性）：
+            - merge 目标 id 必须存在；跨作者（前缀 != author_id）或幻觉 id 一律拒绝；
+            - 每个遗漏 id 恰好被分配一次（重复分配 / 遗漏未覆盖 / 幻觉 raw id 都拒绝）。
+        """
+        by_id: dict[str, ConsolidationGroup] = {
+            canonical_strategy_id(author_id, g.canonical_name): g for g in existing_groups}
         merged = list(existing_groups)
-        by_name: dict[str, ConsolidationGroup] = {
-            _normalize(g.canonical_name).lower(): g for g in merged}
-        for rg in repair_groups:
-            target = by_name.get(_normalize(rg.canonical_name).lower())
-            if target is not None:
-                target.source_strategy_ids.extend(rg.source_strategy_ids)
-            else:
-                merged.append(rg)
-                by_name[_normalize(rg.canonical_name).lower()] = rg
+        missing_set = set(missing_ids)
+        seen: Counter[str] = Counter()
+        for a in assignments:
+            for sid in a.source_strategy_ids:
+                if sid not in missing_set:
+                    raise ConsolidationError(
+                        f"repair 引用了未遗漏的 raw id：`{sid}`（可能幻觉或重复处理已分组 id）")
+                seen[sid] += 1
+                if seen[sid] > 1:
+                    raise ConsolidationError(f"repair 重复分配 raw id：`{sid}`")
+            if a.action == "merge_existing":
+                tid = a.target_canonical_id
+                if "::" in tid and tid.split("::", 1)[0] != author_id:
+                    raise ConsolidationError(
+                        f"repair 跨作者 target canonical id：`{tid}` 不属于 `{author_id}`")
+                target = by_id.get(tid)
+                if target is None:
+                    raise ConsolidationError(f"repair target canonical id 不存在：`{tid}`")
+                target.source_strategy_ids.extend(a.source_strategy_ids)
+            else:  # create_new
+                merged.append(ConsolidationGroup(
+                    canonical_name=a.canonical_name,
+                    canonical_description=a.canonical_description,
+                    source_strategy_ids=a.source_strategy_ids,
+                    trigger_summary=a.trigger_summary,
+                    operation_summary=a.operation_summary,
+                    effect_summary=a.effect_summary,
+                    reasoning_summary=a.reasoning_summary,
+                    confidence=a.confidence,
+                ))
+        uncovered = sorted(missing_set - set(seen))
+        if uncovered:
+            raise ConsolidationError(f"repair 未覆盖的遗漏 raw id：{uncovered}")
         return merged
 
     # ------------------------------------------------------------------ #
@@ -380,7 +515,7 @@ class StrategyConsolidator:
             if not missing:
                 # 幻觉 id / 重复赋值等非"覆盖缺失"问题：修复无意义，直接上抛
                 raise
-            repair_groups = self.repair(groups, raw_by_id, missing, author_id)
-            groups = self._merge_repair(groups, repair_groups)
+            assignments = self.repair(groups, raw_by_id, missing, author_id)
+            groups = self._apply_repair(groups, assignments, author_id, missing)
             self.validate_mapping(prepared_ids, groups)  # 修复后必须完整
         return self.build_canonicals(raw_by_id, groups, author_id)

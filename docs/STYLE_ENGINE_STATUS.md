@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 4.5 (run) — COMPLETE: author-scoped canonical consolidation executed (real `deepseek-chat`) |
-| **Last completed checkpoint** | Canonical strategy sets built: Austen 51→26, Dickens 44→36 (full coverage); truncation + omission-repair bugs fixed; 161 tests |
+| **Current phase** | Phase 4.5 (repair hardening) — COMPLETE: coverage-repair now keyed by stable `canonical_strategy_id` (not name); no data change, no LLM re-run |
+| **Last completed checkpoint** | Repair identity hardening: `repair()`/merge reference `canonical_strategy_id`; Austen/Dickens artifacts untouched; 166 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -45,7 +45,7 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
-- **161 tests passed** (was 158). +13 Phase 4.5 tests: author-scope isolation,
+- **166 tests passed** (was 161). +13 Phase 4.5 tests: author-scope isolation,
   missing-author rejection, complete source coverage, duplicate-assignment /
   hallucinated / missing source-id rejection, canonical provenance
   (raw→chunk→work→evidence), cross-author same-name ids, canonical-id stability,
@@ -55,6 +55,10 @@ Short current-state snapshot (≈1–2 min read). History lives in
   out-of-range (<0 / >1) rejection, LLMResponseError wrap on invalid fields.
   +3 Phase 4.5-run tests: max_tokens propagation, repair-into-existing-group,
   repair-creates-new-group.
+  +7 repair-hardening tests (replacing the 2 name-based repair tests): merge-by-
+  `canonical_strategy_id`, paraphrase-does-not-spawn-new-canonical, create_new,
+  duplicate-assignment reject, incomplete-coverage reject, hallucinated-raw-id
+  reject, cross-author-target reject.
 
 ## Latest experiment results (deterministic, no LLM)
 - Layer A: 2,328 TRAIN chunks × 22 features.

@@ -751,6 +751,45 @@ strategy 集合，完成 Phase 4.5 的落地产物（复用 Phase 4.4 注册表�
 
 ---
 
+## Checkpoint — Phase 4.5 (repair hardening): canonical identity keyed by id, not name
+
+**Status:** COMPLETE
+
+### Goal
+收尾加固 Phase 4.5 的覆盖修复（`repair()`）：把「按 `canonical_name` 精确匹配」升级为
+「按稳定 `canonical_strategy_id` 引用」，消除 name paraphrase 可能造成「误建新 canonical」
+的长期稳健性风险。仅本地加固 patch；不改动已确认的 Austen / Dickens consolidation 结果，
+不重跑任何真实 LLM，不启动 Phase 5。
+
+### Implementation
+- 新增 `RepairAssignment` dataclass + 严格 `from_dict`：显式区分 `merge_existing`
+  （仅 `target_canonical_id`）与 `create_new`（完整 canonical 定义）；字段非法即抛
+  `LLMResponseError`，绝不静默。
+- `repair()` 改向已有组暴露 `canonical_strategy_id`（+ name / description / trigger /
+  operation / effect 摘要），响应契约改为 `{"assignments": [...]}`。
+- 新增 `_apply_repair()`（替换 `_merge_repair()`）：按 `canonical_strategy_id` 匹配 merge
+  目标，**绝不按 name 匹配**；并确定性校验：跨作者 target 拒绝、幻觉 target 拒绝、重复
+  分配拒绝、遗漏未覆盖拒绝、幻觉 raw id 拒绝。修复后仍跑 `validate_mapping` 复验。
+- 约束保持：首次合并契约/缓存不变；author-scope 隔离 / provenance / support_status /
+  canonical id 稳定性均未改动。
+
+### Cache / version
+- repair 的 prompt 与响应契约改变，故在 repair cache key 的 `extra` 加入
+  `repair_contract_version=2.0`，杜绝旧 repair 缓存被新代码复用。
+- 首次合并的 cache key（`prompt_name=strategy_consolidation:...`）完全不变 → 不无效化
+  已有的 Austen/Dickens 首轮合并缓存（内容寻址本已区分，显式版本为双保险）。
+
+### Tests
+- **166 passed**（was 161）：新增/改写 7 个 repair 稳健性测试（merge_by_id、paraphrase
+  不新建、create_new、重复分配拒绝、遗漏未覆盖拒绝、幻觉 raw id 拒绝、跨作者 target 拒绝）；
+  首轮合并行为不变由既有 `test_consolidate_end_to_end_with_dummy_provider` 覆盖。
+
+### Non-goals（本次明确不做）
+- 未重跑 Austen/Dickens consolidation；未调用真实 LLM（测试全确定性）；未改动任何
+  `data/analysis/consolidation/` 产物；未开始 Phase 5。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git
