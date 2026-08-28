@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 8.1 (Evaluation Decision Integrity & Revision Safety) — COMPLETE: 三阶决策 gate（Content Integrity > Literary Quality guard > Style Fidelity）+ no_action + 改写后内容完整性检查 + 文学评价证据契约；真实 deepseek-chat 已跑（8,594 token，43 cache hit / 4 miss）；311 tests |
-| **Last completed checkpoint** | Phase 8.1 真实验证: Austen 文学 8.5→8.7 + 完整性 passed → **continue**（偏差 9→8）；Dickens 文学 8.5→8.5 + 完整性确定性短路 passed → **roll_back**（改写器判定无需改动）；12 维度证据契约全 observed（每维 2–3 条逐字证据）；产物 `data/analysis/evaluation_v2/`，v1 与 Phase 7 产物未动；311 tests |
+| **Current phase** | Phase 8.2 (Revision Effect & Measurement Validity) — COMPLETE（确定性，未运行真实 LLM）：新增 Gate 0 改写有效性门（`RevisionEffectAnalyzer`，零 token）+ `no_effect` 语义 + 自报字段降级 `claimed_*`；356 tests |
+| **Last completed checkpoint** | Phase 8.2 实现 + 确定性 dry-run：Austen 改写 `punctuation_only` / Dickens `identical` → 均 **no_effect**（短路后续昂贵步骤，杜绝 LLM 测量噪声被记为改善）；Phase 8.1 Post-Run Audit 结论 NEEDS_FIX 的缺陷已修；产物隔离到未来 `evaluation_v3/`，v1/v2 未动；356 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -309,6 +309,32 @@ Short current-state snapshot (≈1–2 min read). History lives in
   短路 passed → 偏差 9→9 → **roll_back**；12 维度证据契约全 observed（每维 2–3 条逐字证据）。
 - Tests：**311 passed**（+24 全确定性 Dummy-provider 零 token）。
 
+## Phase 8.1 Post-Run Audit — COMPLETE (NEEDS_FIX)
+- 确定性审计（`knowledge/evaluation/audit.py`，零 LLM，21 测试）：从既有产物独立重建
+  逐项偏差对照 + 文本 diff + 证据契约审计 + 决策重构。产物
+  `data/analysis/evaluation_v2/phase8_1_postrun_audit.json` / `.md`。
+- 三阶 gate 决策逻辑重建正确（stored==reconstructed），但发现真实 feedback 缺陷：
+  Austen 改写为标点 no-op（词级零改动）却自报实质 `change_descriptions`（幻觉）；9→8 的
+  "改善"与 8.5→8.7 的文学提升均来自 LLM 测量噪声（文本无实质改动）；`revision_items_applied=9`
+  与文本词级零改动矛盾；Dickens 字节级相等却落 `roll_back` 而非 `no_effect`。→ Phase 8.2 修。
+
+## Phase 8.2 (Revision Effect & Measurement Validity) — COMPLETE（确定性，未运行真实 LLM）
+- 新增 **Gate 0（Revision Effect）**（`RevisionEffectAnalyzer`，确定性零 token）：canonical
+  归一化（排版标点 + 空白，绝不改词形/词序）→ `identical` / `formatting_only` /
+  `punctuation_only` / `substantive`；只有 `substantive_edit==True` 才允许 after 比较。
+- `no_effect` 独立于 `no_action` 与 `roll_back`；短路后续一切昂贵步骤（完整性/重测/文学
+  评价/策略匹配 0 调用）。
+- 改写器自报字段降级 `claimed_*`（best-effort）；`RevisionResult` 附着 deterministic
+  `revision_effect`；`FeedbackDecision` 新增 `revision_effect` / `literary_guard_status` /
+  `style_comparison_performed`。
+- 版本隔离：新增 `REVISION_EFFECT_*` / `REVISION_RESULT_SCHEMA_VERSION`；bump
+  `REVISION_REWRITER_VERSION` 与 `FEEDBACK_DECISION_SCHEMA_VERSION` 至 0.2.0；未来真实运行
+  写 `evaluation_v3/`（v1/v2 绝不覆盖）。
+- 确定性 dry-run（Phase 8.1 既有产物）：Austen `punctuation_only` → no_effect；Dickens
+  `identical` → no_effect。
+- Tests：**356 passed**（+24 确定性回归，含 `run_evaluation` Gate 0 短路断言 provider 0 调用）。
+
 ## Next planned action
-- **Phase 9**：多轮反馈（`max_iterations > 2`）、段级 stylometric 漂移定位（spec §15.4），
-  以及 §19.5 生成可控性实验——均为后续独立增量，非本次反馈环内容。
+- **STOP，等待人工 review**。本轮不运行真实 LLM、不进入 Phase 9。人工确认 Phase 8.2
+  实现后，再决定是否在 `evaluation_v3/` 命名空间下真实运行 Phase 8.2。之后才是 Phase 9
+  （多轮反馈、段级 stylometric 漂移定位、§19.5 生成可控性实验）。

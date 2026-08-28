@@ -18,7 +18,9 @@ from typing import Any
 from ..schema.versions import (
     CONTENT_INTEGRITY_VERSION, EVALUATION_SCHEMA_VERSION,
     FEEDBACK_DECISION_SCHEMA_VERSION, LITERARY_EVALUATION_SCHEMA_VERSION,
-    LITERARY_EVALUATOR_VERSION, REVISION_REWRITER_VERSION,
+    LITERARY_EVALUATOR_VERSION, REVISION_EFFECT_ANALYZER_VERSION,
+    REVISION_EFFECT_SCHEMA_VERSION, REVISION_RESULT_SCHEMA_VERSION,
+    REVISION_REWRITER_VERSION,
 )
 
 # 6 个文学评价维度（独立 LLM 文学评价，README_AGENTS "评价迭代器"）。
@@ -68,9 +70,34 @@ FEEDBACK_ACCEPT = "accept"
 FEEDBACK_CONTINUE = "continue"
 FEEDBACK_ROLL_BACK = "roll_back"
 FEEDBACK_NO_ACTION = "no_action"
+FEEDBACK_NO_EFFECT = "no_effect"     # 计划非空但改写无实质词级变化（Phase 8.2）
 FEEDBACK_OUTCOMES: tuple[str, ...] = (
     FEEDBACK_ACCEPT, FEEDBACK_CONTINUE, FEEDBACK_ROLL_BACK, FEEDBACK_NO_ACTION,
+    FEEDBACK_NO_EFFECT,
 )
+
+# 改写有效性状态（确定性 Revision Effect 门，零 LLM）。IDENTICAL 字节级相等；
+# FORMATTING_ONLY 仅空白/换行；PUNCTUATION_ONLY 仅 Unicode 排版标点归一化；
+# SUBSTANTIVE 存在词级 token 差异。前两者 + PUNCTUATION_ONLY 均为 non-substantive。
+EFFECT_IDENTICAL = "identical"
+EFFECT_FORMATTING_ONLY = "formatting_only"
+EFFECT_PUNCTUATION_ONLY = "punctuation_only"
+EFFECT_SUBSTANTIVE = "substantive"
+EFFECT_STATUSES: tuple[str, ...] = (
+    EFFECT_IDENTICAL, EFFECT_FORMATTING_ONLY, EFFECT_PUNCTUATION_ONLY,
+    EFFECT_SUBSTANTIVE,
+)
+NON_SUBSTANTIVE_STATUSES: frozenset[str] = frozenset((
+    EFFECT_IDENTICAL, EFFECT_FORMATTING_ONLY, EFFECT_PUNCTUATION_ONLY,
+))
+
+# literary guard 状态（FeedbavkDecision 内嵌）：applied = 文学守卫实际参与比较；
+# unavailable = 无法取得文学评价故 fail-closed；not_applicable = 未运行（no_action /
+# 改写失败）；not_applicable_no_effect = 改写无实质变化故不比较。
+GUARD_APPLIED = "applied"
+GUARD_UNAVAILABLE = "unavailable"
+GUARD_NOT_APPLICABLE = "not_applicable"
+GUARD_NOT_APPLICABLE_NO_EFFECT = "not_applicable_no_effect"
 
 # 内容完整性违规严重度：critical 使 passed=False；warning 仅记录不阻断。
 INTEGRITY_CRITICAL = "critical"
@@ -417,16 +444,99 @@ class RevisionPlan:
 
 
 @dataclass
+class RevisionEffectResult:
+    """确定性改写有效性分析结果（Phase 8.2 Revision Effect 门，零 LLM）。
+
+    通过 canonical 归一化（排版标点 + 空白，绝不涉及词形/词序）判断 original → revised
+    是否发生**实质词级变化**。`substantive_edit == True` 是 after-measurement 参与比较
+    的唯一前置条件（杜绝 LLM 测量噪声被记为真实改善）。hash 全部 sha256，canonical_*
+    对 normalize_for_revision_comparison 后的文本求值。
+    """
+    schema_version: str
+    analyzer_version: str
+    effect_status: str                  # identical / formatting_only / punctuation_only / substantive
+    substantive_edit: bool
+    byte_identical: bool
+    normalized_identical: bool
+    original_word_count: int
+    revised_word_count: int
+    word_change_count: int              # canonical 词 token 差异数
+    word_change_ratio: float            # word_change_count / max(original_word_count, 1)
+    sentence_change_count: int
+    original_text_hash: str
+    revised_text_hash: str
+    canonical_original_hash: str
+    canonical_revised_hash: str
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "analyzer_version": self.analyzer_version,
+            "effect_status": self.effect_status,
+            "substantive_edit": self.substantive_edit,
+            "byte_identical": self.byte_identical,
+            "normalized_identical": self.normalized_identical,
+            "original_word_count": self.original_word_count,
+            "revised_word_count": self.revised_word_count,
+            "word_change_count": self.word_change_count,
+            "word_change_ratio": self.word_change_ratio,
+            "sentence_change_count": self.sentence_change_count,
+            "original_text_hash": self.original_text_hash,
+            "revised_text_hash": self.revised_text_hash,
+            "canonical_original_hash": self.canonical_original_hash,
+            "canonical_revised_hash": self.canonical_revised_hash,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "RevisionEffectResult":
+        _require(d, "schema_version", "analyzer_version", "effect_status",
+                 "substantive_edit", "byte_identical", "normalized_identical",
+                 "original_word_count", "revised_word_count", "word_change_count",
+                 "word_change_ratio", "sentence_change_count",
+                 "original_text_hash", "revised_text_hash",
+                 "canonical_original_hash", "canonical_revised_hash", "reason")
+        _guard_version(d, REVISION_EFFECT_SCHEMA_VERSION)
+        return cls(
+            schema_version=d["schema_version"],
+            analyzer_version=d["analyzer_version"],
+            effect_status=d["effect_status"],
+            substantive_edit=d["substantive_edit"],
+            byte_identical=d["byte_identical"],
+            normalized_identical=d["normalized_identical"],
+            original_word_count=d["original_word_count"],
+            revised_word_count=d["revised_word_count"],
+            word_change_count=d["word_change_count"],
+            word_change_ratio=d["word_change_ratio"],
+            sentence_change_count=d["sentence_change_count"],
+            original_text_hash=d["original_text_hash"],
+            revised_text_hash=d["revised_text_hash"],
+            canonical_original_hash=d["canonical_original_hash"],
+            canonical_revised_hash=d["canonical_revised_hash"],
+            reason=d["reason"],
+        )
+
+
+@dataclass
 class RevisionResult:
-    """一次最小编辑改写的结果：新正文 + 变更说明（局部性映射）+ 溯源。"""
+    """一次最小编辑改写的结果：新正文 + 自报变更说明 + deterministic 有效性 + 溯源。
+
+    Phase 8.2：改写器的自报字段（`change_descriptions` / `revision_items_applied`）
+    降级为 `claimed_*`（best-effort，LLM 自报，绝不作为"已修复"的权威证据）。真实
+    有效性由 `revision_effect`（确定性 diff 计算，零 LLM）给出。为兼容旧 schema，
+    from_dict 在缺少 claimed_* 时回退读取旧字段名 `change_descriptions` /
+    `revision_items_applied`（Phase 8.1 产物仍可解析）。
+    """
     schema_version: str
     author_id: str
     passage_id: str
     original_passage_hash: str
     revised_passage_hash: str
     revised_text: str
-    change_descriptions: list[str] = field(default_factory=list)
-    revision_items_applied: list[str] = field(default_factory=list)
+    claimed_change_descriptions: list[str] = field(default_factory=list)
+    claimed_revision_items: list[str] = field(default_factory=list)
+    revision_effect: dict[str, Any] | None = None   # RevisionEffectResult.to_dict()
     blind: bool = True
     rewriter_version: str = REVISION_REWRITER_VERSION
 
@@ -438,8 +548,9 @@ class RevisionResult:
             "original_passage_hash": self.original_passage_hash,
             "revised_passage_hash": self.revised_passage_hash,
             "revised_text": self.revised_text,
-            "change_descriptions": list(self.change_descriptions),
-            "revision_items_applied": list(self.revision_items_applied),
+            "claimed_change_descriptions": list(self.claimed_change_descriptions),
+            "claimed_revision_items": list(self.claimed_revision_items),
+            "revision_effect": self.revision_effect,
             "blind": self.blind,
             "rewriter_version": self.rewriter_version,
         }
@@ -448,17 +559,21 @@ class RevisionResult:
     def from_dict(cls, d: dict[str, Any]) -> "RevisionResult":
         _require(d, "schema_version", "author_id", "passage_id",
                  "original_passage_hash", "revised_passage_hash", "revised_text",
-                 "change_descriptions", "revision_items_applied", "blind",
-                 "rewriter_version")
-        _guard_version(d)
+                 "blind", "rewriter_version")
+        _guard_version(d, REVISION_RESULT_SCHEMA_VERSION)
         return cls(
             schema_version=d["schema_version"], author_id=d["author_id"],
             passage_id=d["passage_id"],
             original_passage_hash=d["original_passage_hash"],
             revised_passage_hash=d["revised_passage_hash"],
             revised_text=d["revised_text"],
-            change_descriptions=list(d["change_descriptions"]),
-            revision_items_applied=list(d["revision_items_applied"]),
+            claimed_change_descriptions=list(
+                d.get("claimed_change_descriptions",
+                      d.get("change_descriptions", []))),
+            claimed_revision_items=list(
+                d.get("claimed_revision_items",
+                      d.get("revision_items_applied", []))),
+            revision_effect=d.get("revision_effect"),
             blind=d["blind"], rewriter_version=d["rewriter_version"],
         )
 
@@ -570,11 +685,16 @@ class ContentIntegrityResult:
 @dataclass
 class FeedbackDecision:
     """反馈决策（可审计）：Style Fidelity 与 Literary Quality 分别报告，绝不合并成
-    单一加权总分。决策基于 gate/规则，而非一个神秘加权分。"""
+    单一加权总分。决策基于 gate/规则，而非一个神秘加权分。
+
+    Phase 8.2：`revision_effect` 内嵌确定性改写有效性；`literary_guard_status` 记录
+    文学守卫是否实际参与比较；`style_comparison_performed` 标记 after-measurement
+    是否被执行（no_effect 时为 False，杜绝测量噪声被计入改善）。
+    """
     schema_version: str
-    outcome: str                       # accept / continue / roll_back / no_action
+    outcome: str                       # accept / continue / roll_back / no_action / no_effect
     reason: str
-    content_integrity_passed: bool | None      # None = 未运行（no_action / 改写失败）
+    content_integrity_passed: bool | None      # None = 未运行（no_action / no_effect / 改写失败）
     content_integrity: dict[str, Any] | None   # ContentIntegrityResult.to_dict() 或 None
     style_fidelity: dict[str, Any]             # {before_n, after_n, improved}
     literary_quality: dict[str, Any]           # {before, after, drop, tolerance,
@@ -583,6 +703,9 @@ class FeedbackDecision:
     max_iterations: int
     author_id: str = ""
     passage_id: str = ""
+    revision_effect: dict[str, Any] | None = None   # RevisionEffectResult.to_dict()
+    literary_guard_status: str = GUARD_NOT_APPLICABLE  # applied/unavailable/not_applicable/not_applicable_no_effect
+    style_comparison_performed: bool = True            # no_effect → False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -597,6 +720,9 @@ class FeedbackDecision:
             "max_iterations": self.max_iterations,
             "author_id": self.author_id,
             "passage_id": self.passage_id,
+            "revision_effect": self.revision_effect,
+            "literary_guard_status": self.literary_guard_status,
+            "style_comparison_performed": self.style_comparison_performed,
         }
 
     @classmethod
@@ -615,4 +741,8 @@ class FeedbackDecision:
             literary_quality=d["literary_quality"],
             iteration=d["iteration"], max_iterations=d["max_iterations"],
             author_id=d.get("author_id", ""), passage_id=d.get("passage_id", ""),
+            revision_effect=d.get("revision_effect"),
+            literary_guard_status=d.get("literary_guard_status",
+                                        GUARD_NOT_APPLICABLE),
+            style_comparison_performed=d.get("style_comparison_performed", True),
         )

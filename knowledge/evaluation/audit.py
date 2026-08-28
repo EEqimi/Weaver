@@ -606,9 +606,9 @@ def run_postrun_audit(data_root_: Path | None = None) -> dict[str, Any]:
                           and stored_decision.get("reason") == reconstructed.get("reason")),
             },
             "revision": {
-                "n_change_descriptions": (len(rev_result.change_descriptions)
+                "n_change_descriptions": (len(rev_result.claimed_change_descriptions)
                                           if rev_result is not None else 0),
-                "n_revision_items_applied": (len(rev_result.revision_items_applied)
+                "n_revision_items_applied": (len(rev_result.claimed_revision_items)
                                              if rev_result is not None else 0),
                 "n_revision_items_planned": len(
                     json.loads((out_dir / f"{author_id}_revision_plan.json")

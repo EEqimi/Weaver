@@ -55,7 +55,7 @@ from knowledge.providers.llm_provider import DummyLLMProvider, UnconfiguredLLMPr
 from knowledge.schema.versions import (
     CONTENT_INTEGRITY_VERSION, EVALUATION_SCHEMA_VERSION,
     FEEDBACK_DECISION_SCHEMA_VERSION, LITERARY_EVALUATION_SCHEMA_VERSION,
-    STYLE_PLAN_SCHEMA_VERSION,
+    REVISION_RESULT_SCHEMA_VERSION, STYLE_PLAN_SCHEMA_VERSION,
 )
 from knowledge.stylometry.extract import StylometricVectorizer
 
@@ -242,10 +242,19 @@ def test_schema_round_trips():
     assert RevisionPlan.from_dict(plan.to_dict()).revision_items[0].target == "f"
 
     res = RevisionResult(
-        schema_version=EVALUATION_SCHEMA_VERSION, author_id="austen", passage_id="p1",
-        original_passage_hash="a", revised_passage_hash="b", revised_text="t",
-        change_descriptions=["d"], revision_items_applied=["P3:f"])
+        schema_version=REVISION_RESULT_SCHEMA_VERSION, author_id="austen",
+        passage_id="p1", original_passage_hash="a", revised_passage_hash="b",
+        revised_text="t", claimed_change_descriptions=["d"],
+        claimed_revision_items=["P3:f"])
     assert RevisionResult.from_dict(res.to_dict()).revised_text == "t"
+    # 旧字段名（Phase 8.1 产物）→ 向后兼容：from_dict 回退读取并填充 claimed_*。
+    legacy = {"schema_version": REVISION_RESULT_SCHEMA_VERSION, "author_id": "a",
+              "passage_id": "p", "original_passage_hash": "a",
+              "revised_passage_hash": "b", "revised_text": "t",
+              "change_descriptions": ["old"], "revision_items_applied": ["P3:f"],
+              "blind": True, "rewriter_version": "0.1.0"}
+    assert RevisionResult.from_dict(legacy).claimed_change_descriptions == ["old"]
+    assert RevisionResult.from_dict(legacy).claimed_revision_items == ["P3:f"]
 
 
 def test_phase_81_schema_round_trips():
@@ -307,8 +316,8 @@ def test_schema_version_guard_rejects_wrong_version():
         RevisionResult: {
             "schema_version": "999.0.0", "author_id": "a", "passage_id": "p",
             "original_passage_hash": "a", "revised_passage_hash": "b",
-            "revised_text": "t", "change_descriptions": [],
-            "revision_items_applied": [], "blind": True, "rewriter_version": "v",
+            "revised_text": "t", "claimed_change_descriptions": [],
+            "claimed_revision_items": [], "blind": True, "rewriter_version": "v",
         },
         ContentIntegrityResult: {
             "schema_version": "999.0.0", "checker_version": "v", "passed": True,
@@ -539,7 +548,7 @@ def test_rewriter_returns_result():
     out = RevisionRewriter(prov).rewrite(TEXT, plan)
     assert isinstance(out, RevisionResult)
     assert out.revised_text.startswith("She walked alone")
-    assert out.change_descriptions == ["combined two sentences"]
+    assert out.claimed_change_descriptions == ["combined two sentences"]
     assert out.original_passage_hash != out.revised_passage_hash
 
 

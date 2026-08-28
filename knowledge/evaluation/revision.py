@@ -25,7 +25,10 @@ from ..generation.schema import (
 )
 from ..planning.schema import StylePlan
 from ..providers.llm_provider import LLMProvider, cache_key
-from ..schema.versions import EVALUATION_SCHEMA_VERSION, REVISION_REWRITER_VERSION
+from ..schema.versions import (
+    EVALUATION_SCHEMA_VERSION, REVISION_RESULT_SCHEMA_VERSION,
+    REVISION_REWRITER_VERSION,
+)
 from .schema import (
     ComparisonResult, EvalError, EvaluationPolicy, LiteraryEvaluation,
     RevisionItem, RevisionPlan, RevisionResult, priority_rank,
@@ -212,14 +215,14 @@ class RevisionRewriter:
         # 空改写计划 → 确定性短路，绝不烧 token（原样返回，变更说明为空）。
         if not plan.revision_items:
             return RevisionResult(
-                schema_version=EVALUATION_SCHEMA_VERSION,
+                schema_version=REVISION_RESULT_SCHEMA_VERSION,
                 author_id=plan.author_id,
                 passage_id=plan.passage_id,
                 original_passage_hash=output_hash(original_text),
                 revised_passage_hash=output_hash(original_text),
                 revised_text=original_text,
-                change_descriptions=[],
-                revision_items_applied=[],
+                claimed_change_descriptions=[],
+                claimed_revision_items=[],
                 blind=self.blind,
                 rewriter_version=ANALYZER_VERSION,
             )
@@ -240,7 +243,7 @@ class RevisionRewriter:
         ]
         key = cache_key(
             text=original_text, analyzer_id=ANALYZER_ID,
-            analyzer_version=ANALYZER_VERSION, schema_version=EVALUATION_SCHEMA_VERSION,
+            analyzer_version=ANALYZER_VERSION, schema_version=REVISION_RESULT_SCHEMA_VERSION,
             model=self._provider.model, provider_id=self._provider.provider_id,
             prompt_name=f"revision:blind={self.blind}:n_items={len(plan.revision_items)}",
         )
@@ -257,14 +260,14 @@ class RevisionRewriter:
         if not isinstance(descs, list) or not all(isinstance(x, str) for x in descs):
             raise LLMResponseError("revision 的 change_descriptions 必须是字符串列表")
         return RevisionResult(
-            schema_version=EVALUATION_SCHEMA_VERSION,
+            schema_version=REVISION_RESULT_SCHEMA_VERSION,
             author_id=plan.author_id,
             passage_id=plan.passage_id,
             original_passage_hash=output_hash(original_text),
             revised_passage_hash=output_hash(revised),
             revised_text=revised,
-            change_descriptions=list(descs),
-            revision_items_applied=[f"{i.priority}:{i.target}" for i in plan.revision_items],
+            claimed_change_descriptions=list(descs),
+            claimed_revision_items=[f"{i.priority}:{i.target}" for i in plan.revision_items],
             blind=self.blind,
             rewriter_version=ANALYZER_VERSION,
         )

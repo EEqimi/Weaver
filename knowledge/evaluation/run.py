@@ -1,20 +1,23 @@
 # knowledge/evaluation/run.py
-"""Phase 8.1 执行：评价决策完整性 + 改写安全性（对 Phase 7 生成正文跑反馈闭环）。
+"""Phase 8.2 执行：改写有效性 + 测量有效性（对 Phase 7 生成正文跑反馈闭环）。
 
-与 Phase 8 的区别（spec §一/§三）：
-    - 决策不再只比较 Style Fidelity 偏差数量，而是三阶 gate：
+与 Phase 8.1 的区别（spec §三/§十四/§十六）：
+    - 决策改为四阶 gate，在 Content Integrity 之前新增 **Revision Effect 门**（确定性，
+      零 token）：改写无实质词级变化 → `no_effect`，短路后续一切昂贵步骤；
+        0. Revision Effect（改写是否实质变化：identical/formatting_only/punctuation_only
+           /substantive；non-substantive → no_effect 短路）；
         1. Content Integrity（最高）：改写是否破坏情节/角色/关系/约束/事件 → roll_back；
         2. Literary Quality guard：文学总分下降超过可配置容忍度 → roll_back；
         3. Style Fidelity：偏差是否减少 → accept / continue / roll_back。
-    - Style Fidelity 与 Literary Quality **分别报告**，绝不合并成单一加权总分；
-    - 文学评价 evidence contract：每维至少 1 条逐字验证证据，否则 insufficient_evidence
-      （不进加权总分；全维 insufficient → 整体 unavailable）；
-    - no_action：改写计划为空 → 明确 no_action（非 roll_back）；
-    - 改写后先跑 ContentIntegrityChecker，再重测风格（省 token，spec §十一）。
+    - 只有 `substantive_edit == True` 才允许 after-measurement 参与比较，杜绝 LLM 测量
+      噪声（对等价文本的评分漂移）被记为真实改善；
+    - 改写器自报字段降级为 `claimed_*`（best-effort），真实有效性由 deterministic
+      `revision_effect` 给出；
+    - no_effect 独立于 no_action（空计划）与 roll_back（实质改写被拒）。
 
 铁律：
-    - 绝不覆盖 data/analysis/evaluation/（Phase 8 v1 原始产物）；Phase 8.1 写入新的
-      data/analysis/evaluation_v2/；LLM cache 复用 v1（避免无谓重测，spec §十七）；
+    - 绝不覆盖 data/analysis/evaluation/（Phase 8 v1）或 evaluation_v2/（Phase 8.1）；
+      Phase 8.2 未来真实运行时写入新的 evaluation_v3/（本轮不运行真实 LLM）；
     - 文学评价与改写器、内容完整性检查器均盲测；改写指令与完整性 prompt 绝不含作者名
       或模仿令牌；stylometric 距离只诊断；P4 恒无改写指令；密钥只读（DEEPSEEK_API_KEY）。
 """
@@ -36,17 +39,20 @@ from ..providers.llm_provider import (
 from ..schema.versions import EVALUATION_SCHEMA_VERSION, FEEDBACK_DECISION_SCHEMA_VERSION
 from .analyze import measure_actual_profile
 from .compare import compare_target_actual
+from .effect import RevisionEffectAnalyzer
 from .integrity import ContentIntegrityChecker
 from .literary import LiteraryEvaluator
 from .revision import RevisionRewriter, build_revision_plan
 from .schema import (
     ComparisonResult, ContentIntegrityResult, EvalError, EvaluationPolicy,
-    FeedbackDecision, LiteraryEvaluation, RevisionResult,
-    FEEDBACK_ACCEPT, FEEDBACK_CONTINUE, FEEDBACK_NO_ACTION, FEEDBACK_ROLL_BACK,
+    FeedbackDecision, LiteraryEvaluation, RevisionEffectResult, RevisionResult,
+    FEEDBACK_ACCEPT, FEEDBACK_CONTINUE, FEEDBACK_NO_ACTION, FEEDBACK_NO_EFFECT,
+    FEEDBACK_ROLL_BACK, GUARD_NOT_APPLICABLE_NO_EFFECT,
 )
 
 EVALUATION_DIRNAME = "evaluation"          # Phase 8 v1（保留，绝不覆盖）
-EVALUATION_DIRNAME_V2 = "evaluation_v2"    # Phase 8.1 新产物
+EVALUATION_DIRNAME_V2 = "evaluation_v2"    # Phase 8.1（保留，绝不覆盖）
+EVALUATION_DIRNAME_V3 = "evaluation_v3"    # Phase 8.2 新产物
 MAX_ITERATIONS = 2
 
 
@@ -54,9 +60,9 @@ MAX_ITERATIONS = 2
 # 布局 / provider
 # --------------------------------------------------------------------------- #
 def evaluation_layout(data_root_: Path | None = None) -> dict[str, Path]:
-    """Phase 8.1 布局：产物写入 evaluation_v2；LLM cache 复用 v1（省 token）。"""
+    """Phase 8.2 布局：产物写入 evaluation_v3；LLM cache 复用 v1（省 token）。"""
     base = Path(data_root_) if data_root_ is not None else default_data_root()
-    return {"root": base / "analysis" / EVALUATION_DIRNAME_V2,
+    return {"root": base / "analysis" / EVALUATION_DIRNAME_V3,
             "cache": base / "analysis" / EVALUATION_DIRNAME / "llm_cache"}
 
 
@@ -94,10 +100,11 @@ def _literary_quality(before: float | None, after: float | None,
                       policy: EvaluationPolicy, *, guard: str) -> dict[str, Any]:
     """文学质量护栏报告（绝不把 unavailable 的分数当 0）。
 
-    `guard` 三种状态：
+    `guard` 状态：
         - "applied"：before/after 均有分数，执行下降容忍度检查；
         - "unavailable"：before 或 after 缺失，护栏无法评估（绝不伪造基线/结果）；
-        - "not_applicable"：no_action 或 integrity 失败（未进入文学护栏）。
+        - "not_applicable"：no_action 或 integrity 失败（未进入文学护栏）；
+        - "not_applicable_no_effect"：改写无实质变化（Phase 8.2 no_effect，不比较）。
     """
     drop = round(before - after, 4) if (before is not None and after is not None) else None
     evaluated = guard == "applied" and before is not None and after is not None
@@ -117,7 +124,9 @@ def _make_decision(outcome: str, reason: str, *,
                    before_n: int | None, after_n: int | None,
                    lit: dict[str, Any],
                    content_integrity: ContentIntegrityResult | None,
-                   author_id: str, passage_id: str) -> FeedbackDecision:
+                   author_id: str, passage_id: str,
+                   revision_effect: dict[str, Any] | None = None,
+                   style_comparison_performed: bool = True) -> FeedbackDecision:
     return FeedbackDecision(
         schema_version=FEEDBACK_DECISION_SCHEMA_VERSION,
         outcome=outcome, reason=reason,
@@ -129,6 +138,9 @@ def _make_decision(outcome: str, reason: str, *,
         literary_quality=lit,
         iteration=iteration, max_iterations=max_iterations,
         author_id=author_id, passage_id=passage_id,
+        revision_effect=revision_effect,
+        literary_guard_status=lit["guard"],
+        style_comparison_performed=style_comparison_performed,
     )
 
 
@@ -142,14 +154,17 @@ def decide_feedback_outcome(
     literary_after: float | None = None,
     content_integrity: ContentIntegrityResult | None = None,
     no_revision: bool = False,
+    revision_effect: RevisionEffectResult | None = None,
     policy: EvaluationPolicy | None = None,
     author_id: str = "",
     passage_id: str = "",
 ) -> FeedbackDecision:
-    """三阶 gate（spec §四/§五）：Content Integrity > Literary Quality > Style Fidelity。
+    """四阶 gate（spec §三）：Revision Effect → Content Integrity → Literary Quality
+    → Style Fidelity。
 
     Style Fidelity 与 Literary Quality 分别报告，绝不合并成单一加权总分；决策基于
-    gate/规则，而非神秘加权分。
+    gate/规则，而非神秘加权分。`revision_effect` 非空且 non-substantive → no_effect
+    （短路，绝不进入后续 gate；杜绝 LLM 测量噪声被记为改善）。
     """
     policy = policy or EvaluationPolicy()
     before_n = _count_high_priority_deviations(before) if before is not None else 0
@@ -164,6 +179,22 @@ def decide_feedback_outcome(
             lit=_literary_quality(literary_before, literary_after, policy,
                                   guard="not_applicable"),
             content_integrity=None, author_id=author_id, passage_id=passage_id)
+
+    # STEP 0.5：Revision Effect 门（Phase 8.2，确定性零 token）：改写无实质词级变化
+    # → no_effect。独立于 no_action（空计划）与 roll_back（实质改写被拒）。短路后续
+    # 一切昂贵步骤（完整性 / 重测 / 文学评价 / 策略匹配），绝不把 LLM 测量噪声记为改善。
+    if revision_effect is not None and not revision_effect.substantive_edit:
+        return _make_decision(
+            FEEDBACK_NO_EFFECT,
+            f"revision produced no substantive textual change "
+            f"(effect_status={revision_effect.effect_status})",
+            iteration=iteration, max_iterations=max_iterations,
+            before_n=before_n, after_n=None,
+            lit=_literary_quality(literary_before, literary_after, policy,
+                                  guard=GUARD_NOT_APPLICABLE_NO_EFFECT),
+            content_integrity=None, author_id=author_id, passage_id=passage_id,
+            revision_effect=revision_effect.to_dict(),
+            style_comparison_performed=False)
 
     # STEP 1：Content Integrity gate（最高优先级；破坏内容 → roll_back）
     if content_integrity is not None and not content_integrity.passed:
@@ -341,53 +372,71 @@ def run_evaluation(data_root_: Path | None = None,
                 eval_after = None
                 comparison_after = None
             else:
-                # Content Integrity gate（先于风格重测，省 token；spec §十一）
-                integrity = checker.check(
-                    passage.generated_text, rev_result.revised_text, request,
-                    author_names=names)
+                # Gate 0：Revision Effect（确定性，零 token）——改写是否产生实质词级变化。
+                effect = RevisionEffectAnalyzer().analyze(
+                    passage.generated_text, rev_result.revised_text)
+                rev_result.revision_effect = effect.to_dict()
 
-                if isinstance(integrity, AnalysisUnavailable):
-                    decision = FeedbackDecision(
-                        schema_version=FEEDBACK_DECISION_SCHEMA_VERSION,
-                        outcome=FEEDBACK_ROLL_BACK,
-                        reason="content integrity check unavailable; fail-closed",
-                        content_integrity_passed=None, content_integrity=None,
-                        style_fidelity=_style_fidelity(
-                            _count_high_priority_deviations(comparison_before), None),
-                        literary_quality=_literary_quality(
-                            lit_before, None, policy, evaluated=False),
-                        iteration=1, max_iterations=MAX_ITERATIONS,
+                if not effect.substantive_edit:
+                    # no_effect：改写无实质变化 → 短路，绝不调 integrity / 重测 /
+                    # 文学评价 / 策略匹配（杜绝 LLM 测量噪声被记为改善；spec §十四）。
+                    decision = decide_feedback_outcome(
+                        comparison_before, None, iteration=1,
+                        max_iterations=MAX_ITERATIONS, literary_before=lit_before,
+                        literary_after=None, content_integrity=None,
+                        no_revision=False, revision_effect=effect, policy=policy,
                         author_id=author_id, passage_id=passage.generation_id)
                     integrity = None
                     actual_after = None
                     eval_after = None
                     comparison_after = None
-                elif not integrity.passed:
-                    decision = decide_feedback_outcome(
-                        comparison_before, None, iteration=1,
-                        max_iterations=MAX_ITERATIONS, literary_before=lit_before,
-                        literary_after=None, content_integrity=integrity,
-                        no_revision=False, policy=policy, author_id=author_id,
-                        passage_id=passage.generation_id)
-                    actual_after = None
-                    eval_after = None
-                    comparison_after = None
                 else:
-                    rev_passage_id = f"{passage.generation_id}:rev1"
-                    actual_after = measure_actual_profile(
-                        rev_result.revised_text, author_id=author_id,
-                        passage_id=rev_passage_id, style_plan_id=plan.style_plan_id,
-                        profile=profile, provider=provider, data_root_=base)
-                    eval_after = _evaluate(evaluator, rev_result.revised_text,
-                                           author_id, rev_passage_id)
-                    comparison_after = compare_target_actual(
-                        plan, profile, actual_after, band_thresholds)
-                    decision = decide_feedback_outcome(
-                        comparison_before, comparison_after, iteration=1,
-                        max_iterations=MAX_ITERATIONS, literary_before=lit_before,
-                        literary_after=(eval_after.total_score if eval_after else None),
-                        content_integrity=integrity, no_revision=False, policy=policy,
-                        author_id=author_id, passage_id=passage.generation_id)
+                    # Content Integrity gate（先于风格重测，省 token；spec §十一）
+                    integrity = checker.check(
+                        passage.generated_text, rev_result.revised_text, request,
+                        author_names=names)
+
+                    if isinstance(integrity, AnalysisUnavailable):
+                        decision = _make_decision(
+                            FEEDBACK_ROLL_BACK,
+                            "content integrity check unavailable; fail-closed",
+                            iteration=1, max_iterations=MAX_ITERATIONS,
+                            before_n=_count_high_priority_deviations(comparison_before),
+                            after_n=None,
+                            lit=_literary_quality(lit_before, None, policy,
+                                                  guard="unavailable"),
+                            content_integrity=None, author_id=author_id,
+                            passage_id=passage.generation_id)
+                        integrity = None
+                        actual_after = None
+                        eval_after = None
+                        comparison_after = None
+                    elif not integrity.passed:
+                        decision = decide_feedback_outcome(
+                            comparison_before, None, iteration=1,
+                            max_iterations=MAX_ITERATIONS, literary_before=lit_before,
+                            literary_after=None, content_integrity=integrity,
+                            no_revision=False, policy=policy, author_id=author_id,
+                            passage_id=passage.generation_id)
+                        actual_after = None
+                        eval_after = None
+                        comparison_after = None
+                    else:
+                        rev_passage_id = f"{passage.generation_id}:rev1"
+                        actual_after = measure_actual_profile(
+                            rev_result.revised_text, author_id=author_id,
+                            passage_id=rev_passage_id, style_plan_id=plan.style_plan_id,
+                            profile=profile, provider=provider, data_root_=base)
+                        eval_after = _evaluate(evaluator, rev_result.revised_text,
+                                               author_id, rev_passage_id)
+                        comparison_after = compare_target_actual(
+                            plan, profile, actual_after, band_thresholds)
+                        decision = decide_feedback_outcome(
+                            comparison_before, comparison_after, iteration=1,
+                            max_iterations=MAX_ITERATIONS, literary_before=lit_before,
+                            literary_after=(eval_after.total_score if eval_after else None),
+                            content_integrity=integrity, no_revision=False, policy=policy,
+                            author_id=author_id, passage_id=passage.generation_id)
 
         # 9. 落盘
         _write_json(out_dir / f"{author_id}_actual_profile.json", actual.to_dict())
@@ -416,8 +465,11 @@ def run_evaluation(data_root_: Path | None = None,
             "n_revision_items": len(rev_plan.revision_items),
             "revision_items_by_priority": rev_plan.metadata.get("by_priority"),
             "revision_items": [i.to_dict() for i in rev_plan.revision_items],
-            "change_descriptions": (rev_result.change_descriptions
-                                    if isinstance(rev_result, RevisionResult) else []),
+            "claimed_change_descriptions": (rev_result.claimed_change_descriptions
+                                            if isinstance(rev_result, RevisionResult)
+                                            else []),
+            "revision_effect": (rev_result.revision_effect
+                                if isinstance(rev_result, RevisionResult) else None),
             "comparison_after": (comparison_after.summary
                                  if comparison_after is not None else None),
             "literary_total_after": (eval_after.total_score if eval_after else None),
@@ -482,15 +534,15 @@ def _build_summary(provider: LLMProvider, policy: EvaluationPolicy,
 # --------------------------------------------------------------------------- #
 def _render_report(summary: dict[str, Any], authors: dict[str, Any]) -> str:
     lines = [
-        "# Weaver Style Engine — Style Feedback Loop + 文学评价报告（Phase 8.1）",
+        "# Weaver Style Engine — Style Feedback Loop + 文学评价报告（Phase 8.2）",
         "",
         f"- provider / model：`{summary.get('provider')}` / `{summary.get('model')}`",
         f"- blind：`{summary.get('blind')}`　max_iterations：`{summary.get('max_iterations')}`",
         f"- evaluation policy：`{json.dumps(summary.get('evaluation_policy'), ensure_ascii=False)}`",
         "",
-        "决策为三阶 gate：Content Integrity（最高）→ Literary Quality guard → Style "
-        "Fidelity。Style 与 Literary **分别报告**，绝不合并成单一加权分；stylometric "
-        "距离仅诊断；no_action 独立于 roll_back。",
+        "决策为四阶 gate：Revision Effect（确定性零 token）→ Content Integrity（最高）→ "
+        "Literary Quality guard → Style Fidelity。Style 与 Literary **分别报告**，绝不"
+        "合并成单一加权分；stylometric 距离仅诊断；no_effect 独立于 no_action 与 roll_back。",
         "",
     ]
     for author_id in AUTHOR_IDS:
@@ -513,9 +565,21 @@ def _render_report(summary: dict[str, Any], authors: dict[str, Any]) -> str:
         for item in a["revision_items"]:
             lines.append(f"- **[{item['priority']}]**（{item['category']} / {item['target']}）"
                          f"{item['instruction']}")
-        lines += ["", "### 改写变更说明", ""]
-        for ch in a["change_descriptions"]:
+        lines += ["", "### 改写变更说明（自报，best-effort）", ""]
+        for ch in a["claimed_change_descriptions"]:
             lines.append(f"- {ch}")
+        eff = a.get("revision_effect")
+        if eff is not None:
+            lines += [
+                "",
+                "### 改写有效性（确定性，零 LLM）",
+                "",
+                f"- effect_status：`{eff['effect_status']}`　"
+                f"substantive_edit：`{eff['substantive_edit']}`　"
+                f"word_change_count：`{eff['word_change_count']}`　"
+                f"word_change_ratio：`{eff['word_change_ratio']}`",
+                f"- {eff['reason']}",
+            ]
         lines += ["", "### 内容完整性检查", ""]
         ci = a.get("content_integrity")
         if ci is None:
@@ -545,11 +609,12 @@ def _render_report(summary: dict[str, Any], authors: dict[str, Any]) -> str:
     lines += [
         "---",
         "",
-        "> 机器可读产物见 `data/analysis/evaluation_v2/`（actual_profile / "
+        "> 机器可读产物见 `data/analysis/evaluation_v3/`（actual_profile / "
         "literary_evaluation / revision_plan / revision_result / content_integrity / "
         "revised_actual_profile / revised_literary_evaluation / evaluation_summary.json）。"
-        " Phase 8 v1 原始产物见 `data/analysis/evaluation/`（未覆盖）。stylometric 距离"
-        "仅为诊断，从未进入改写指令或决策。",
+        " Phase 8 v1 原始产物见 `data/analysis/evaluation/`，Phase 8.1 见 "
+        "`data/analysis/evaluation_v2/`（均未覆盖）。stylometric 距离仅为诊断，从未进入"
+        "改写指令或决策。",
     ]
     return "\n".join(lines) + "\n"
 
@@ -569,7 +634,7 @@ def main() -> None:
               f"lit_drop={lq['drop']} integrity={d['content_integrity_passed']} "
               f"outcome={d['outcome']}")
     print(f"token_usage: {summary['token_usage']}")
-    print("artifacts: data/analysis/evaluation_v2/evaluation_summary.json + "
+    print("artifacts: data/analysis/evaluation_v3/evaluation_summary.json + "
           "evaluation_report.md + {author_id}_{actual_profile,literary_evaluation,"
           "revision_plan,revision_result,content_integrity,revised_actual_profile,"
           "revised_literary_evaluation}.json")

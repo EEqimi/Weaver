@@ -1361,6 +1361,59 @@ Accept / Continue / Roll Back；并加**独立**的 6 维 LLM 文学评价（1�
 
 ---
 
+## Phase 8.1 Post-Run Audit — COMPLETE (NEEDS_FIX)
+
+- 新增 `knowledge/evaluation/audit.py`（确定性审计 runner，零 LLM）+ `tests/test_audit.py`
+  （21 测试）。从既有 `evaluation_v2/` + `generation/` 产物独立重建：逐项偏差对照
+  （A/B/C/D/E 分类）、确定性文本 diff（identical/punctuation_only/minimal/substantive）、
+  证据契约审计（逐字引文存在性/复用/过短）、决策重构（复用 `decide_feedback_outcome`）。
+- 产物：`data/analysis/evaluation_v2/phase8_1_postrun_audit.json` + `.md`。
+- **结论 NEEDS_FIX**。核心发现（进入 Phase 8.2 修）：
+  1. Austen 改写是**标点归一化 no-op**（词数 703→703、改动词 token 0），却自报多个实质
+     `change_descriptions`（幻觉）；
+  2. Austen 9→8 的"改善"来自 Layer C strategy match 的 LLM 翻转（文本无实质改动）；
+  3. Austen 文学 8.5→8.7 来自 LLM evaluator 噪声（文本无实质改动仍漂移 0.2）；
+  4. Austen/Dickens `revision_items_applied=9` 与文本词级零改动矛盾；
+  5. Dickens 字节级相等却落 `roll_back` 而非更贴切的 `no_effect`。
+- 三阶 gate 决策逻辑本身重建正确（stored==reconstructed）。
+
+## Phase 8.2 (Revision Effect & Measurement Validity) — COMPLETE（确定性，未运行真实 LLM）
+
+修复 Phase 8.1 Post-Run Audit 的真实 feedback 缺陷。**本轮只做代码/测试/文档 + 确定性
+验证，绝不调用 DeepSeek/Qwen/任何真实 LLM，绝不重新生成 Austen/Dickens 正文，绝不进入
+Phase 9。**
+
+- 新增 **Gate 0（Revision Effect）**，置于 Content Integrity 之前：`RevisionEffectAnalyzer`
+  （`knowledge/evaluation/effect.py`，确定性零 token）用 `normalize_for_revision_comparison`
+  canonical 归一化（Unicode 弯引号/弯连字符/省略号 + 空白/NBSP/换行，**绝不**改词形或词序）
+  判断改写是否产生实质词级变化。
+- 有限 `effect_status` 枚举：`identical` / `formatting_only` / `punctuation_only` /
+  `substantive`。只有 `substantive_edit == True` 才允许 after-measurement 参与比较
+  （杜绝 LLM 测量噪声被记为改善）；`word_change_count` / `word_change_ratio` /
+  `sentence_change_count` + 四个 sha256 hash（原文/改后/canonical 原文/canonical 改后）。
+- `no_effect` 独立于 `no_action`（空计划）与 `roll_back`（实质改写被拒）；短路后续一切
+  昂贵步骤（不调 ContentIntegrityChecker / LiteraryEvaluator(after) / NarrativeAnalyzer /
+  StrategyMiner / after-style 比较）。
+- 改写器自报字段降级：`change_descriptions`→`claimed_change_descriptions`、
+  `revision_items_applied`→`claimed_revision_items`（best-effort，绝不作为权威证据）；
+  真实有效性由 deterministic `revision_effect` 给出。`RevisionResult.from_dict` 向后兼容
+  旧字段名（Phase 8.1 产物仍可解析）。
+- `FeedbackDecision` 新增 `revision_effect` / `literary_guard_status`（含
+  `not_applicable_no_effect`）/ `style_comparison_performed`；`FEEDBACK_NO_EFFECT` 加入
+  结果枚举。
+- 版本隔离：新增 `REVISION_EFFECT_SCHEMA_VERSION` / `REVISION_EFFECT_ANALYZER_VERSION` /
+  `REVISION_RESULT_SCHEMA_VERSION`；bump `REVISION_REWRITER_VERSION=0.1.0→0.2.0`、
+  `FEEDBACK_DECISION_SCHEMA_VERSION=0.1.0→0.2.0`（绝不复用 Phase 8.1 decision/rewriter
+  cache）。Phase 8.2 未来真实运行写 `data/analysis/evaluation_v3/`（v1/v2 绝不覆盖）。
+- 确定性 dry-run（读 Phase 8.1 既有产物，零 LLM）：Austen → `punctuation_only`、
+  `substantive_edit=False` → **no_effect**；Dickens → `identical` → **no_effect**。
+- Tests：**356 passed**（新增 `tests/test_effect.py` 24 项确定性回归：分类/归一化/词序
+  不变性/no_effect 短路语义/`run_evaluation` Gate 0 短路（断言 checker 0 调用、literary
+  evaluator 仅 before 1 次、重测仅 before 1 次、provider.complete 0 调用）/schema 往返 +
+  版本 guard + 旧字段向后兼容）。绝无真实 LLM、绝无真实 `data/` 写入。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

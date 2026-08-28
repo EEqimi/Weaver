@@ -61,3 +61,17 @@ LITERARY_EVALUATION_SCHEMA_VERSION = "0.2.0"
 LITERARY_EVALUATOR_VERSION = "0.2.0"
 CONTENT_INTEGRITY_VERSION = "0.1.0"
 FEEDBACK_DECISION_SCHEMA_VERSION = "0.1.0"
+
+# Phase 8.2：改写有效性 + 测量有效性（修复 Phase 8.1 Post-Run Audit 的真实缺陷）。
+# 新增确定性 Revision Effect 门（零 LLM）判断改写是否产生实质词级变化：no_effect 语义
+# 独立于 no_action（空计划）与 roll_back（实质改写被拒）；改后仅当 substantive_edit
+# 才允许 after-measurement 参与比较（杜绝 LLM 测量噪声被记为真实改善）。
+# RevisionResult 自报字段（revision_items_applied / change_descriptions）降级为
+# claimed_*（best-effort，绝不作为权威证据），并附着 deterministic revision_effect。
+# FeedbackDecision 新增 revision_effect / literary_guard_status /
+# style_comparison_performed。独立版本，避免错误复用 Phase 8.1 decision/rewriter 缓存。
+REVISION_RESULT_SCHEMA_VERSION = "0.2.0"
+REVISION_EFFECT_SCHEMA_VERSION = "0.1.0"
+REVISION_EFFECT_ANALYZER_VERSION = "0.1.0"
+REVISION_REWRITER_VERSION = "0.2.0"
+FEEDBACK_DECISION_SCHEMA_VERSION = "0.2.0"
