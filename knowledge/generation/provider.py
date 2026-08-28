@@ -53,6 +53,7 @@ class GenerationProvider:
             ),
             n_retries=meta["n_retries"],
             cache_hit=False,
+            request_id=meta.get("request_id", ""),
         )
 
 
@@ -81,4 +82,5 @@ class DummyGenerationProvider:
             usage=self._usage,
             n_retries=0,
             cache_hit=False,
+            request_id="",
         )

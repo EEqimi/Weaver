@@ -55,6 +55,15 @@ def by_work_id() -> dict[str, WorkMetadata]:
     return {m.work_id: m for m in CORPUS}
 
 
+def author_display_names() -> dict[str, str]:
+    """author_id → 显示名（如 "austen" → "Jane Austen"）。
+
+    数据驱动，来自 CORPUS 清单（非硬编码在泄露守卫里）。Phase 7.1 用它为
+    `assert_no_author_identity` 提供"当前作者身份"名单，新增作者时无需改守卫代码。
+    """
+    return {m.author_id: m.author for m in CORPUS}
+
+
 def by_author_id() -> dict[str, list[WorkMetadata]]:
     out: dict[str, list[WorkMetadata]] = {}
     for m in CORPUS:

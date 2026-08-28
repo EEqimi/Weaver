@@ -9,12 +9,14 @@
 
 铁律（spec）：
     - 同一 WritingRequest、同一模型、同一生成参数；唯一变量是画像导出的风格控制。
-    - 实际 prompt 绝不含作者名 / "write like" / "imitate" / "in the style of"
-      （`assert_no_author_leakage` fail-closed）。
+    - 实际 prompt 绝不含作者名 / "write like" / "imitate" / "in the style of"：
+      作者身份名单来自 author metadata（`assert_no_author_identity`），模仿指令只查
+      我们生成的风格控制指令（`assert_no_imitation_instruction`），均 fail-closed。
     - 复用 DeepSeekProvider（OpenAI 兼容）的 HTTP 传输，绝不另写第二套 client。
     - 绝不自动评价（Phase 8）；绝不自动改写正文。
     - 密钥只读（DEEPSEEK_API_KEY），绝不打印 / 保存 / 提交。
     - 独立 experiment_id / 无缓存：每次 generate 都是 fresh request（不藏 cache）。
+    - plumbing gate：`run_generation` 必须有合法 plumbing 记录，否则 fail-closed。
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import data_root as default_data_root
+from ..corpus.metadata import author_display_names
 from ..planning.compiler import PromptCompiler
 from ..planning.planner import StylePlanner
 from ..planning.run import (
@@ -36,7 +39,9 @@ from ..schema.versions import (
 from .provider import GenerationProvider
 from .schema import (
     GeneratedPassage, GenerationError, GenerationParameters,
-    assert_no_author_leakage, compiled_prompt_hash, make_generation_id,
+    assert_no_author_identity, assert_no_imitation_instruction,
+    compiled_prompt_hash, make_generation_condition_id, make_generation_id,
+    output_hash,
 )
 
 GENERATION_DIRNAME = "generation"
@@ -52,6 +57,9 @@ TARGET_MAX_WORDS = 800
 # 生成 prompt 的字符预算由 Phase 6.1 编译器保证（max_prompt_chars=6000），此处仅作
 # 记账级保护：若异常超出，拒绝发送（spec §十四 token 成本保护）。
 MAX_PROMPT_CHARS_GUARD = 6000
+
+# plumbing gate 认为"可接受"的 finish_reason（正常完成；"length" 表示截断，不视为合格）。
+ACCEPTABLE_FINISH_REASONS = frozenset({"stop"})
 
 
 def generation_layout(data_root_: Path | None = None) -> dict[str, Path]:
@@ -74,13 +82,38 @@ def build_generation_provider() -> GenerationProvider:
     return GenerationProvider(DeepSeekProvider())
 
 
-def _plan_and_prompt(profile: Any, band_thresholds: dict[str, Any]):
+def _style_control_text(prompt: Any) -> str:
+    """编译提示词里"我们生成的风格控制指令"（除 CONTENT 外的所有 section）。
+
+    模仿指令守卫只查这一段——绝不把用户 brief 正文里合法的 "imitate" 当成泄露。
+    """
+    return "\n\n".join(
+        f"## {s['heading']}\n{s['body']}" for s in prompt.sections
+        if s.get("heading") != "CONTENT")
+
+
+def _author_names_for(author_ids) -> list[str]:
+    """当前作者身份名单（来自语料 metadata，非硬编码）。"""
+    names = author_display_names()
+    return [names[aid] for aid in author_ids if aid in names]
+
+
+def _assert_prompt_safe(prompt: Any, author_names: list[str]) -> None:
+    """prompt 泄露守卫（Phase 7.1 §4，A/B 分离）：
+    B. 全文绝不含当前作者显示名；A. 风格控制指令（非 CONTENT）绝不含模仿令牌。
+    """
+    assert_no_author_identity(prompt.text, author_names)
+    assert_no_imitation_instruction(_style_control_text(prompt))
+
+
+def _plan_and_prompt(profile: Any, band_thresholds: dict[str, Any],
+                     author_names: list[str] | None = None):
     """画像 → StylePlan → CompiledPrompt（确定性），并 fail-closed 校验无作者泄露。"""
     planner = StylePlanner(band_thresholds=band_thresholds)
     compiler = PromptCompiler()
     plan = planner.plan(profile, NEUTRAL_REQUEST)
     prompt = compiler.compile(plan)
-    assert_no_author_leakage(prompt.text)
+    _assert_prompt_safe(prompt, author_names or _author_names_for([profile.author_id]))
     if len(prompt.text) > MAX_PROMPT_CHARS_GUARD:
         raise GenerationError(
             f"{profile.author_id}: prompt {len(prompt.text)} chars 超保护上限 "
@@ -105,10 +138,21 @@ def _build_passage(author_id: str, plan: Any, prompt: Any, result: Any,
                    provenance: dict[str, Any], experiment_id: str,
                    fresh_request: bool) -> GeneratedPassage:
     prompt_hash = compiled_prompt_hash(prompt.text)
+    # 条件身份：作者/计划/prompt/provider/model/参数（确定性，与正文无关）。
+    condition_id = make_generation_condition_id(
+        author_id, plan.style_plan_id, prompt_hash,
+        provider.provider_id, provider.model, parameters.to_dict())
+    # 具体结果身份：条件 + 实验 + 正文 hash（+ provider request id）。正文不同 → id 不同。
     generation_id = make_generation_id(
-        author_id, plan.style_plan_id, prompt_hash, parameters.to_dict())
+        condition_id, experiment_id, output_hash(result.content),
+        getattr(result, "request_id", "") or "")
+    # 风格控制指令（非 CONTENT）一并入 provenance，供渲染阶段复检 A/B 泄露守卫，
+    # 而无需在渲染时重跑 planner/compiler。
+    provenance = dict(provenance)
+    provenance["style_control_text"] = _style_control_text(prompt)
     return GeneratedPassage(
         generation_id=generation_id,
+        generation_condition_id=condition_id,
         schema_version=GENERATION_SCHEMA_VERSION,
         author_id=author_id,
         style_plan_id=plan.style_plan_id,
@@ -128,6 +172,7 @@ def _build_passage(author_id: str, plan: Any, prompt: Any, result: Any,
         provenance=provenance,
         experiment_id=experiment_id,
         fresh_request=fresh_request,
+        request_id=getattr(result, "request_id", "") or "",
     )
 
 
@@ -162,6 +207,7 @@ def run_plumbing(data_root_: Path | None = None,
     record: dict[str, Any] = {
         "experiment_id": EXPERIMENT_ID,
         "plumbing": True,
+        "success": True,
         "author_id": author_id,
         "style_plan_id": plan.style_plan_id,
         "source_profile_hash": plan.source_profile_hash,
@@ -201,6 +247,10 @@ def run_generation(data_root_: Path | None = None,
         {w for p in profiles.values() for w in p.author_scope.get("train_work_ids", [])})
     band_thresholds = _band_thresholds(base, train_work_ids)
 
+    # plumbing gate（Phase 7.1 §2）：正式生成前必须有合法 plumbing 记录，否则 fail-closed。
+    plumbing = _read_plumbing(out_dir)
+    _require_valid_plumbing(plumbing, provider)
+
     passages: dict[str, GeneratedPassage] = {}
     for author_id in AUTHOR_IDS:
         profile = profiles[author_id]
@@ -215,8 +265,6 @@ def run_generation(data_root_: Path | None = None,
         _write_json(out_dir / f"{author_id}_generation.json", passage.to_dict())
         (out_dir / f"{author_id}_passage.md").write_text(
             _render_passage_md(passage), encoding="utf-8")
-
-    plumbing = _read_plumbing(out_dir)
 
     experiment = _build_experiment(passages, provider, plumbing)
     _write_json(out_dir / "generation_experiment.json", experiment)
@@ -233,6 +281,39 @@ def _read_plumbing(out_dir: Path) -> dict[str, Any] | None:
     if p.exists():
         return _load_json(p)
     return None
+
+
+def _require_valid_plumbing(plumbing: dict[str, Any] | None,
+                            provider: GenerationProvider) -> None:
+    """plumbing gate（Phase 7.1 §2）：缺 / 失败 / 不匹配的 plumbing 一律 fail-closed。
+
+    绝不 "merely record plumbing=None"——正式生成前必须验证 plumbing 记录存在且合格。
+    """
+    if not plumbing:
+        raise GenerationError(
+            "缺 plumbing 记录：正式生成前必须先跑 `run_plumbing`（fail-closed）")
+    if plumbing.get("plumbing") is not True:
+        raise GenerationError("plumbing 记录不是合法 plumbing（plumbing!=True）")
+    if plumbing.get("success") is not True:
+        raise GenerationError("plumbing 未成功（success!=True）")
+    if not plumbing.get("content_char_count"):
+        raise GenerationError("plumbing 生成的正文为空（content_char_count=0）")
+    if plumbing.get("finish_reason") not in ACCEPTABLE_FINISH_REASONS:
+        raise GenerationError(
+            f"plumbing finish_reason 不合格: {plumbing.get('finish_reason')!r}")
+    if plumbing.get("provider") != provider.provider_id:
+        raise GenerationError(
+            f"plumbing provider 不匹配: {plumbing.get('provider')!r} != "
+            f"{provider.provider_id!r}")
+    if plumbing.get("model") != provider.model:
+        raise GenerationError(
+            f"plumbing model 不匹配: {plumbing.get('model')!r} != {provider.model!r}")
+    if plumbing.get("generation_parameters") != GENERATION_PARAMETERS.to_dict():
+        raise GenerationError("plumbing generation_parameters 与本次不一致")
+    if plumbing.get("fresh_request") is not True:
+        raise GenerationError("plumbing 不是 fresh_request（可能藏 cache）")
+    if plumbing.get("cache_hit") is not False:
+        raise GenerationError("plumbing 命中 cache（cache_hit!=False）")
 
 
 def _build_experiment(passages: dict[str, GeneratedPassage],
@@ -312,9 +393,11 @@ def _render_passage_md(p: GeneratedPassage) -> str:
     lines = [
         f"# {p.author_id.capitalize()} — Style-Conditioned Generated Passage",
         "",
-        "- **experiment_id**: `{p.experiment_id}`",
-        "- **generation_id**: `{p.generation_id}`",
-        "- **schema_version**: `{p.schema_version}`  **generation_version**: `{p.generation_version}`",
+        f"- **experiment_id**: `{p.experiment_id}`",
+        f"- **generation_condition_id**: `{p.generation_condition_id}`",
+        f"- **generation_id**: `{p.generation_id}`",
+        f"- **schema_version**: `{p.schema_version}`  **generation_version**: `{p.generation_version}`",
+        f"- **request_id**: `{p.request_id}`",
         f"- **author_id**: `{p.author_id}`",
         f"- **style_plan_id**: `{p.style_plan_id}`",
         f"- **source_profile_hash**: `{p.source_profile_hash}`",
@@ -387,10 +470,14 @@ def _render_comparison(passages: dict[str, GeneratedPassage],
 
     lines += ["", "## 无作者泄露校验（fail-closed）", ""]
     for aid in AUTHOR_IDS:
+        p = passages[aid]
         try:
-            assert_no_author_leakage(passages[aid].compiled_prompt)
-            lines.append(f"- {aid}: prompt **不含**作者名 / `write like` / `imitate` / "
-                         f"`in the style of`")
+            # B. 全文绝不含当前作者显示名（名单来自 author metadata）；A. 风格控制
+            # 指令（非 CONTENT）绝不含模仿令牌。二者任一违反即视为泄露、拒绝发送。
+            assert_no_author_identity(p.compiled_prompt, _author_names_for([aid]))
+            assert_no_imitation_instruction(p.provenance.get("style_control_text", ""))
+            lines.append(f"- {aid}: prompt **不含**作者名（来自 metadata）或模仿指令 "
+                         f"`write like` / `imitate` / `in the style of`")
         except GenerationError as e:
             lines.append(f"- {aid}: **泄露检出 → 已拒绝发送**: {e}")
 

@@ -178,7 +178,8 @@ class OpenAICompatibleProvider:
                 return {"content": content or "",
                         "finish_reason": finish_reason,
                         "usage": dict(usage),
-                        "n_retries": retries_this_call}
+                        "n_retries": retries_this_call,
+                        "request_id": data.get("id", "")}
             except (urllib.error.HTTPError, urllib.error.URLError,
                     TimeoutError, OSError, json.JSONDecodeError, KeyError) as e:
                 last_err = e

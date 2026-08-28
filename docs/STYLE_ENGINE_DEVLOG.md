@@ -1156,6 +1156,57 @@ guidance 从"人工绝对阈值 + 超出测量的文学解释"改为"TRAIN-only 
 
 ---
 
+## Checkpoint — Phase 7.1: Provenance / Integrity Hardening（零 token）
+
+Phase 7 review 通过后、Phase 8 之前的 provenance / 完整性加固。**零 token、不调用
+DeepSeek、不生成/不评价/不改写任何正文**；既有 Austen/Dickens 生成产物保持原样、
+**绝不重生成**。
+
+### 1. 生成身份模型（条件 vs 结果分离）
+- `generation_condition_id`：作者 / style_plan / prompt hash / provider / model /
+  参数的确定性 hash——标识"这次生成的条件"（同一条件多次随机抽样，条件 id 不变）。
+- `generation_id`：具体生成结果的 identity = `condition_id + experiment_id + output
+  hash (+ provider request id)`。同条件下两次 fresh 抽样若正文不同 → output hash
+  不同 → `generation_id` 不同。**绝不依赖当前时间**。
+- `GenerationResult` 新增 `request_id`；`GeneratedPassage` 新增
+  `generation_condition_id`（必填）与 `request_id`。
+- 向后兼容：`from_dict` 对缺 `generation_condition_id` 的 Phase 7 旧产物回退到旧
+  `generation_id`（当时它其实就是条件 id），**绝不要求重生成**。
+
+### 2. Plumbing gate（fail-closed）
+- `run_generation()` 在正式生成前强制校验 plumbing 记录：文件存在、`plumbing` /
+  `success` 为 True、正文非空、`finish_reason ∈ {"stop"}`、provider/model 匹配、
+  `generation_parameters` 一致、`fresh_request=true`、`cache_hit=false`。任一违反 →
+  `GenerationError`（绝不 "merely record plumbing=None"）。
+
+### 3. Markdown 渲染修复
+- `_render_passage_md` 的 `{p.experiment_id}` / `{p.generation_id}` /
+  `{p.schema_version}` / `{p.generation_version}` 行补 `f` 前缀（此前漏了 f-string，
+  渲染出字面量占位符），并新增 `generation_condition_id` / `request_id`。
+- 新增测试：渲染 Markdown 含真实 ID、无未解析 `{p.` 占位符。
+
+### 4. 泄露守卫 A/B 分离（数据驱动，非硬编码）
+- 删 `BANNED_AUTHOR_LEAK_TOKENS` / `assert_no_author_leakage`，拆为：
+  - A. `assert_no_imitation_instruction`（`write like` / `imitate` / `in the style
+    of`）——**只查我们生成的风格控制指令**（非 CONTENT section），绝不查用户 brief
+    正文（`imitate` 是普通英语动词，可合法出现在故事情节里）。
+  - B. `assert_no_author_identity`（作者显示名名单）——名单来自 author metadata
+    （`author_display_names()`），非硬编码 Austen/Dickens，新增作者无需改守卫代码。
+- 风格控制指令在 `_build_passage` 时入 `provenance["style_control_text"]`，渲染阶段
+  据此复检，无需重跑 planner/compiler。
+
+### Tests（全确定性，Dummy provider，零 token）
+- **267 passed**（was 254）：+13 Phase 7.1 测试——同条件不同正文 → 不同
+  `generation_id`；同 prompt/参数 → 同 `generation_condition_id`；缺 plumbing 阻塞
+  正式生成；失败/不匹配 plumbing 阻塞；合法 plumbing 放行；Markdown 含已解析元数据；
+  泄露守卫支持未来作者身份；用户正文合法 "imitate" 不误报作者身份泄露。
+
+### Non-goals（本次明确不做）
+- **不调用 DeepSeek、不生成新正文、不评价/不改写既有 Austen/Dickens 段落；
+  既有 Phase 7 产物保持原样（generation_condition_id 通过向后兼容回填，绝不重生成）。**
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 7 (Style-Conditioned Generation) — COMPLETE: first real style-conditioned generation run (Austen + Dickens conditioned passages from one neutral WritingRequest, `deepseek-chat`); one plumbing request + two fresh formal requests; no author-name injection, no auto evaluation, no auto revision; Phase 8 (evaluation loop) not started |
-| **Last completed checkpoint** | Phase 7: `knowledge/generation/` (`schema.py`/`provider.py`/`run.py`), provider `complete_with_metadata` + `top_p` + `base_url`, compiler `IMPORTANT` reworded (no `imitate`/`write like`/`in the style of`), `GENERATION_SCHEMA_VERSION`/`GENERATION_VERSION`; 254 tests |
+| **Current phase** | Phase 7.1 (provenance/integrity hardening) — COMPLETE (zero token): condition_id vs generation_id split, plumbing gate (fail-closed), markdown fix, leakage guard A/B separation (data-driven); existing Austen/Dickens passages unchanged; Phase 8 (evaluation loop) not started |
+| **Last completed checkpoint** | Phase 7.1: `generation_condition_id`/`generation_id` identity model + `request_id`, `_require_valid_plumbing` gate, `_render_passage_md` f-string fix, `assert_no_imitation_instruction`/`assert_no_author_identity` (metadata-supplied names), backward-compatible `from_dict`; 267 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -125,12 +125,34 @@ Short current-state snapshot (≈1–2 min read). History lives in
   `generation_plumbing.json`，gitignored）。
 - 无自动评价（Phase 8）、无自动改写。
 
+## Phase 7.1 (provenance / integrity hardening) — COMPLETE (zero token)
+- **身份模型**：`generation_condition_id`（作者/计划/prompt/provider/model/参数 的确定性
+  hash，标识"条件"）与 `generation_id`（`condition_id + experiment_id + output hash
+  (+ request id)`，标识"具体结果"）分离。同条件不同正文 → 不同 `generation_id`；同条件
+  同正文 → 同 id；**绝不依赖当前时间**。`GeneratedPassage` 新增 `generation_condition_id`
+  + `request_id`；`from_dict` 对 Phase 7 旧产物向后兼容回填，绝不要求重生成。
+- **Plumbing gate**：`run_generation` 正式生成前强制 `_require_valid_plumbing`（文件存在
+  / success / 正文非空 / finish_reason=stop / provider+model 匹配 / 参数一致 /
+  fresh_request=true / cache_hit=false），任一违反 → `GenerationError`（fail-closed）。
+- **Markdown 修复**：`_render_passage_md` 补 f-string 前缀（`{p.experiment_id}` 等不再
+  渲染成字面量），新增 `generation_condition_id`/`request_id`；测试保证无未解析 `{p.`。
+- **泄露守卫 A/B 分离**：A. `assert_no_imitation_instruction` 只查风格控制指令（非
+  CONTENT），用户 brief 正文合法的 "imitate" 绝不误报；B. `assert_no_author_identity`
+  作者名单来自 author metadata（`author_display_names()`），支持未来作者身份，非硬编码。
+- **零 token**：不调用 DeepSeek、不生成/不评价/不改写正文；既有 Austen/Dickens 产物
+  保持原样（未重生成）。
+
 ## Current corpus
 - **TRAIN:** Pride and Prejudice, Emma (Austen); Great Expectations, David Copperfield (Dickens).
 - **HELD-OUT:** Persuasion (Austen); A Tale of Two Cities (Dickens).
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
+- **267 tests passed** (was 254). +13 Phase 7.1 tests (Dummy provider, zero token):
+  同条件不同正文 → 不同 `generation_id`、同 prompt/参数 → 同 `generation_condition_id`、
+  缺 plumbing 阻塞正式生成、失败/不匹配 plumbing 阻塞、合法 plumbing 放行、Markdown
+  含已解析元数据（无 `{p.` 占位符）、泄露守卫支持未来作者身份、用户正文合法 "imitate"
+  不误报作者身份泄露、旧产物向后兼容（缺 `generation_condition_id` 回填）。
 - **254 tests passed** (was 236). +18 Phase 7 tests (Dummy provider, zero token):
   GenerationResult/usage/参数序列化、GeneratedPassage 往返 + finish_reason、空生成拒绝、
   prompt hash 正确 + 敏感、generation_id 确定性、作者名/模仿令牌泄露检出、编译 prompt
@@ -246,6 +268,6 @@ Short current-state snapshot (≈1–2 min read). History lives in
   落实为确定性门槛 gate 并写入 warning：strong 激活的 candidate_core 仍是 CANDIDATE。
 
 ## Next planned action
-- **Human review of Phase 7 artifacts**（`data/analysis/generation/`：Austen/Dickens
-  generated passage + 对比报告 + 汇总）——然后才进入 Phase 8（evaluation loop，对生成
-  正文做文学评价）。
+- **Phase 8（evaluation loop）**：对 Phase 7 生成的 Austen/Dickens 正文做文学评价
+  （此前仍需人工 review Phase 7 artifacts，`data/analysis/generation/`）。Phase 7.1
+  provenance/integrity hardening 已完成并作为进入 Phase 8 的前置。
