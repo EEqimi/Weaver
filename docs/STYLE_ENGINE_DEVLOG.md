@@ -1086,6 +1086,76 @@ guidance 从"人工绝对阈值 + 超出测量的文学解释"改为"TRAIN-only 
 
 ---
 
+## Checkpoint — Phase 7: Style-Conditioned Generation（第一次真实作者风格生成实验）
+
+**Status:** COMPLETE
+
+### Goal
+把 Phase 6 的 CompiledPrompt 交给真实生成模型，产出 Austen 条件 / Dickens 条件两段
+正文（GeneratedPassage）。同一 WritingRequest、同一模型、同一生成参数；**唯一变量**是
+画像导出的风格控制。绝不自动评价（Phase 8）、绝不自动改写、绝不在 prompt 注入作者名。
+
+### Implementation
+- `knowledge/generation/schema.py` — `GeneratedPassage` / `GenerationResult` /
+  `GenerationUsage` / `GenerationParameters`；`compiled_prompt_hash`（sha256）、
+  `assert_no_author_leakage`（fail-closed）、`make_generation_id`（确定性）。与
+  analysis 的测量 schema **严格分离**（spec §5）。
+- `knowledge/generation/provider.py` — `GenerationProvider`（复用
+  `OpenAICompatibleProvider.complete_with_metadata` 的同一 HTTP 传输，绝不另写第二套
+  client）+ `DummyGenerationProvider`（测试，零 token）。
+- `knowledge/generation/run.py` — `run_plumbing`（exactly ONE Austen 验证请求）与
+  `run_generation`（正式 Austen + Dickens，fresh request，不藏 cache）+ 对比报告 +
+  汇总。
+- `knowledge/providers/llm_provider.py` — 拆出 `complete_with_metadata`（返回 content
+  + finish_reason + per-call usage），新增 `top_p` 透传与只读 `base_url`。
+- `knowledge/planning/compiler.py` — `IMPORTANT` 段改写，实际 prompt 不再含
+  `imitate` / `write like` / `in the style of`（守卫语义保留：不命名 / 不复现具名作者
+  风格）。
+- `knowledge/schema/versions.py` — `GENERATION_SCHEMA_VERSION=0.1.0`、
+  `GENERATION_VERSION=0.1.0`。
+
+### 生成参数（两位作者严格一致）
+- provider `deepseek` / model `deepseek-chat` / endpoint
+  `https://api.deepseek.com/chat/completions`；`temperature=0.8`、`top_p=0.9`、
+  `max_tokens=2048`；独立 `experiment_id=phase7-generation-v0.1`，无 LLMCache（每次
+  均为 fresh request）。
+
+### 无作者名注入（铁律，spec §8）
+- 实际 prompt 不含 `Jane Austen` / `Charles Dickens` / `write like` / `imitate` /
+  `in the style of`；作者 ID 只在 metadata。`assert_no_author_leakage` 在发送前
+  fail-closed 校验。
+
+### Plumbing request（真实请求前，exactly ONE Austen）
+- finish_reason=`stop`、`n_retries=0`、fresh_request=true。
+- token：prompt 917 / completion 797 / **total 1714**；正文 648 words（500–800 区间）。
+
+### 正式生成（Austen + Dickens，各 1 次 fresh request）
+- Austen：702 words，finish=`stop`，token prompt 917 / completion 871 / total 1788。
+- Dickens：503 words，finish=`stop`，token prompt 982 / completion 620 / total 1602。
+- 两段 prompt 互异（Austen hash `338faf8e…`、Dickens `b8757f34…`）；风格控制不同
+  （同一 brief）。
+- 基本检查（非文学评价）：Austen 第三人称叙事、Dickens 第一人称叙事，均原创内容、
+  无作者名、无复制源文本。
+
+### 产物（`data/analysis/generation/`，gitignored）
+- `generation_experiment.json`、`{austen,dickens}_generation.json`、
+  `{austen,dickens}_passage.md`、`generation_comparison_report.md`、
+  `generation_summary.json`、`generation_plumbing.json`。
+
+### Tests
+- **254 passed**（was 236）：新增 18 个 Phase 7 测试（Dummy provider，零 token）——
+  GenerationResult/usage/参数序列化、GeneratedPassage 往返 + finish_reason、空生成
+  拒绝、prompt hash 正确 + 敏感、generation_id 确定性、作者名/模仿令牌泄露检出、
+  编译 prompt 无作者名无模仿、provenance 保存、同一 WritingRequest 共享、
+  provider/model/参数一致、未配置 provider fail-closed、artifact 布局 + 无自动评价
+  / 无自动改写 + 铁律令牌集合。
+
+### Non-goals（本次明确不做）
+- **不自动评价（Phase 8）、不自动改写正文、不写新故事、不用 Austen/Dickens 原文情节、
+  不打印/保存/提交 `DEEPSEEK_API_KEY`。**
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

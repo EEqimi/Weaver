@@ -116,7 +116,24 @@ class OpenAICompatibleProvider:
     def is_configured(self) -> bool:
         return bool(self._api_key)
 
+    @property
+    def base_url(self) -> str:
+        """后端 base URL（供 provenance/报表记录 endpoint，不含密钥）。"""
+        return self._base_url
+
     def complete(self, messages: list[dict], **kwargs) -> str:
+        """返回模型生成的纯文本（analysis 语义）。"""
+        return self._request(messages, **kwargs)["content"]
+
+    def complete_with_metadata(self, messages: list[dict], **kwargs) -> dict:
+        """返回完整响应（generation 语义）：content + finish_reason + per-call usage。
+
+        与 complete 共用同一 HTTP 传输（绝不另写第二套 client），只是把单次请求的
+        finish_reason / token 用量一并暴露，供 Phase 7 生成记录。
+        """
+        return self._request(messages, **kwargs)
+
+    def _request(self, messages: list[dict], **kwargs) -> dict:
         if not self.is_configured():
             raise LLMNotConfiguredError(
                 f"未配置 LLM provider（缺 {self._env_prefix}_API_KEY）")
@@ -127,6 +144,9 @@ class OpenAICompatibleProvider:
             "temperature": kwargs.get("temperature", self._temperature),
             "max_tokens": kwargs.get("max_tokens", self._max_tokens),
         }
+        top_p = kwargs.get("top_p")
+        if top_p is not None:
+            payload["top_p"] = top_p
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         url = f"{self._base_url}/chat/completions"
         headers = {
@@ -135,8 +155,10 @@ class OpenAICompatibleProvider:
         }
 
         last_err: Exception | None = None
+        retries_this_call = 0
         for attempt in range(self._max_retries + 1):
             if attempt > 0:
+                retries_this_call += 1
                 self.n_retries += 1
                 time.sleep(float(attempt))  # 确定性退避：1s, 2s, ...
             try:
@@ -148,10 +170,15 @@ class OpenAICompatibleProvider:
                 choices = data.get("choices") or []
                 content = (choices[0].get("message", {}).get("content", "")
                            if choices else "")
+                finish_reason = (choices[0].get("finish_reason", "")
+                                 if choices else "")
                 usage = data.get("usage") or {}
                 self._accumulate_usage(usage)
                 self.n_success += 1
-                return content or ""
+                return {"content": content or "",
+                        "finish_reason": finish_reason,
+                        "usage": dict(usage),
+                        "n_retries": retries_this_call}
             except (urllib.error.HTTPError, urllib.error.URLError,
                     TimeoutError, OSError, json.JSONDecodeError, KeyError) as e:
                 last_err = e

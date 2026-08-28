@@ -39,3 +39,8 @@ PROMPT_COMPILER_VERSION = "0.1.0"
 # Phase 6.1：经验 band 阈值（TRAIN-only 分位数）schema 版本。独立版本，避免影响
 # 既有画像/计划缓存；band 阈值由 TRAIN chunk 分布派生，held-out 绝不参与。
 BAND_SCHEMA_VERSION = "0.1.0"
+
+# Phase 7：style-conditioned generation（真实模型生成正文）。独立版本，避免影响
+# 既有画像/计划/阈值缓存；生成响应（GeneratedPassage）与 analysis 测量严格分离。
+GENERATION_SCHEMA_VERSION = "0.1.0"
+GENERATION_VERSION = "0.1.0"

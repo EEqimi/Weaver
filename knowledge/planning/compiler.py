@@ -284,10 +284,13 @@ class PromptCompiler:
 
     @staticmethod
     def _important(verbose: bool = True) -> str:
+        # Phase 7（spec §8）：IMPORTANT 段自身也不得出现 "imitate" / "write like" /
+        # "in the style of" 等令牌——即便作为否定式守卫词，也必须回避，确保实际发给
+        # 模型的 prompt 在这些令牌上严格干净（`assert_no_author_leakage` 会 fail-closed）。
         if verbose:
             return (
-                "- Do not mention any author's name, and do not attempt to imitate or "
-                "\"write like\" a named author.\n"
+                "- Do not name the author of any source text, and do not try to reproduce "
+                "a particular author's manner.\n"
                 "- Do not copy or reproduce wording from any source text; write original "
                 "sentences.\n"
                 "- Preserve the plot, characters, facts, and constraints in CONTENT exactly "
@@ -298,7 +301,7 @@ class PromptCompiler:
                 "- Apply CONDITIONAL STRATEGIES only when their trigger actually occurs."
             )
         return (
-            "- Do not mention or imitate any named author.\n"
+            "- Do not name or reproduce a particular author's manner.\n"
             "- Do not copy any source text; write original sentences.\n"
             "- Preserve CONTENT exactly.\n"
             "- Apply CONDITIONAL STRATEGIES only when their trigger occurs."

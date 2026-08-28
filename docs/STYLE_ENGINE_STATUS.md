@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 6.1 (Evidence-Grounded Guidance & Prompt Budget Integrity) — COMPLETE (REVIEW PENDING): TRAIN-only empirical band thresholds (Q33/Q67) replace arbitrary manual thresholds; literal non-overclaiming guidance; prompt budget degrades deterministically and never truncates user content; no LLM, no generated prose; Phase 7 (generation loop) not started |
-| **Last completed checkpoint** | Phase 6.1: `bands.py` (TRAIN-only empirical banding), `policy.py` de-hardcoded, `planner.py` not_compilable→reference, `compiler.py` budget degradation + `PromptBudgetError` + section consistency + POV CONTENT-only, `band_thresholds.json`; 236 tests |
+| **Current phase** | Phase 7 (Style-Conditioned Generation) — COMPLETE: first real style-conditioned generation run (Austen + Dickens conditioned passages from one neutral WritingRequest, `deepseek-chat`); one plumbing request + two fresh formal requests; no author-name injection, no auto evaluation, no auto revision; Phase 8 (evaluation loop) not started |
+| **Last completed checkpoint** | Phase 7: `knowledge/generation/` (`schema.py`/`provider.py`/`run.py`), provider `complete_with_metadata` + `top_p` + `base_url`, compiler `IMPORTANT` reworded (no `imitate`/`write like`/`in the style of`), `GENERATION_SCHEMA_VERSION`/`GENERATION_VERSION`; 254 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -35,7 +35,7 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 ## What is not implemented yet
 - Full-corpus LLM feature extraction (only the 40-chunk calibration sample has LLM features).
-- Phase 7 and beyond (generation loop, revision loop, evaluation loop).
+- Phase 8 and beyond (evaluation loop, revision loop).
 - Multi-author style mixing (the `conflicts` / `resolution_required` structure is reserved in
   `StylePlan.planner_metadata`, currently empty for single-author planning).
 - NlpAnalyzer (POS) features — NLTK intentionally not installed.
@@ -104,12 +104,38 @@ Short current-state snapshot (≈1–2 min read). History lives in
   dialogue_ratio → "Use dialogue relatively often."、Dickens → "Use dialogue in
   moderate proportion."（字面，无 "prominent/sparse" 文学解释）。
 
+## Phase 7 (style-conditioned generation) — COMPLETE
+- `knowledge/generation/`：`schema.py`（`GeneratedPassage` / `GenerationResult` /
+  `GenerationUsage` / `GenerationParameters` / `compiled_prompt_hash` /
+  `assert_no_author_leakage` / `make_generation_id`）、`provider.py`
+  （`GenerationProvider` 复用 OpenAI 兼容传输 + `DummyGenerationProvider`）、
+  `run.py`（`run_plumbing` + `run_generation` + 对比报告 + 汇总）。
+- provider `deepseek` / model `deepseek-chat` / endpoint
+  `https://api.deepseek.com/chat/completions`；`temperature=0.8`、`top_p=0.9`、
+  `max_tokens=2048`；两位作者参数一致，唯一变量是画像导出的风格控制。
+- 无作者名注入：实际 prompt 不含 `Jane Austen` / `Charles Dickens` / `write like` /
+  `imitate` / `in the style of`（`assert_no_author_leakage` fail-closed；compiler
+  `IMPORTANT` 段已改写，守卫语义保留）。
+- 复用 OpenAICompatibleProvider 的 `complete_with_metadata`（单 client，记录
+  finish_reason + per-call usage），不另写第二套 HTTP；独立 experiment_id / 无缓存，
+  每次生成都是 fresh request。
+- 产物：`data/analysis/generation/`（`generation_experiment.json`、
+  `{austen,dickens}_generation.json`、`{austen,dickens}_passage.md`、
+  `generation_comparison_report.md`、`generation_summary.json`、
+  `generation_plumbing.json`，gitignored）。
+- 无自动评价（Phase 8）、无自动改写。
+
 ## Current corpus
 - **TRAIN:** Pride and Prejudice, Emma (Austen); Great Expectations, David Copperfield (Dickens).
 - **HELD-OUT:** Persuasion (Austen); A Tale of Two Cities (Dickens).
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
+- **254 tests passed** (was 236). +18 Phase 7 tests (Dummy provider, zero token):
+  GenerationResult/usage/参数序列化、GeneratedPassage 往返 + finish_reason、空生成拒绝、
+  prompt hash 正确 + 敏感、generation_id 确定性、作者名/模仿令牌泄露检出、编译 prompt
+  无作者名无模仿、provenance 保存、同一 WritingRequest 共享、provider/model/参数一致、
+  未配置 provider fail-closed、artifact 布局 + 无自动评价/无自动改写 + 铁律令牌集合。
 - **236 tests passed** (was 223). +13 Phase 6.1 tests: TRAIN-only band（held-out 排除 /
   不改变阈值）、band 确定性、跨作者合并阈值、band_label 三档边界、字面 guidance 无未测
   机制、无 band → None、not_compilable→reference、长内容永不硬截断（多档预算）、低优先级
@@ -220,6 +246,6 @@ Short current-state snapshot (≈1–2 min read). History lives in
   落实为确定性门槛 gate 并写入 warning：strong 激活的 candidate_core 仍是 CANDIDATE。
 
 ## Next planned action
-- **Human review of Phase 6.1 artifacts**（`data/analysis/planning/`：band_thresholds.json
-  + Austen/Dickens style_plan + compiled prompt + 对比报告）——然后才进入 Phase 7
-  （generation loop / revision loop，涉及真实 LLM 生成正文）。
+- **Human review of Phase 7 artifacts**（`data/analysis/generation/`：Austen/Dickens
+  generated passage + 对比报告 + 汇总）——然后才进入 Phase 8（evaluation loop，对生成
+  正文做文学评价）。
