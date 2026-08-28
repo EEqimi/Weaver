@@ -17,17 +17,19 @@ Roll Back。另加**独立**的 LLM 文学评价（6 维 1–10 + 证据引文�
     - 密钥只读（DEEPSEEK_API_KEY），绝不打印 / 保存 / 提交；复用 DeepSeekProvider。
 """
 from .schema import (
-    ActualStyleProfile, ComparisonResult, DimensionScore, EvalError,
-    FeatureDeviation, LiteraryEvaluation, NarrativeDeviation, RevisionItem,
-    RevisionPlan, RevisionResult, StrategyCoverage,
+    ActualStyleProfile, ComparisonResult, ContentIntegrityResult,
+    ContentIntegrityViolation, DimensionScore, EvalError, EvaluationPolicy,
+    FeatureDeviation, FeedbackDecision, LiteraryEvaluation, NarrativeDeviation,
+    RevisionItem, RevisionPlan, RevisionResult, StrategyCoverage,
     CATEGORY_TO_PRIORITY, DEFAULT_DIMENSION_WEIGHTS, LITERARY_DIMENSIONS,
     REVISION_PRIORITIES, priority_rank,
 )
 
 __all__ = [
-    "ActualStyleProfile", "ComparisonResult", "DimensionScore", "EvalError",
-    "FeatureDeviation", "LiteraryEvaluation", "NarrativeDeviation", "RevisionItem",
-    "RevisionPlan", "RevisionResult", "StrategyCoverage",
+    "ActualStyleProfile", "ComparisonResult", "ContentIntegrityResult",
+    "ContentIntegrityViolation", "DimensionScore", "EvalError", "EvaluationPolicy",
+    "FeatureDeviation", "FeedbackDecision", "LiteraryEvaluation", "NarrativeDeviation",
+    "RevisionItem", "RevisionPlan", "RevisionResult", "StrategyCoverage",
     "CATEGORY_TO_PRIORITY", "DEFAULT_DIMENSION_WEIGHTS", "LITERARY_DIMENSIONS",
     "REVISION_PRIORITIES", "priority_rank",
 ]

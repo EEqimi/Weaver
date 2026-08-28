@@ -51,3 +51,13 @@ GENERATION_VERSION = "0.1.0"
 EVALUATION_SCHEMA_VERSION = "0.1.0"
 LITERARY_EVALUATOR_VERSION = "0.1.0"
 REVISION_REWRITER_VERSION = "0.1.0"
+
+# Phase 8.1：评价决策完整性 + 改写安全性。只改文学评价 evidence contract、决策 gate、
+# 内容完整性检查、no_action 语义；不改既有画像/计划/生成。文学评价 schema 独立版本
+# （DimensionScore 增 assessment_status / verified_evidence_count），bump 文学评价器
+# 版本使旧 Phase 8 文学 cache 失效（绝不错误复用旧语义）。其它 evaluation schema
+# （ActualStyleProfile / RevisionPlan / RevisionResult）保持不变，仍用 EVALUATION_SCHEMA_VERSION。
+LITERARY_EVALUATION_SCHEMA_VERSION = "0.2.0"
+LITERARY_EVALUATOR_VERSION = "0.2.0"
+CONTENT_INTEGRITY_VERSION = "0.1.0"
+FEEDBACK_DECISION_SCHEMA_VERSION = "0.1.0"

@@ -25,6 +25,7 @@ import pytest
 from knowledge.analysis.base import AnalysisUnavailable, LLMResponseError
 from knowledge.evaluation.analyze import _layer_d_diagnostic, measure_actual_profile
 from knowledge.evaluation.compare import compare_target_actual
+from knowledge.evaluation.integrity import ContentIntegrityChecker
 from knowledge.evaluation.literary import LiteraryEvaluator
 from knowledge.evaluation.revision import (
     RevisionRewriter, _build_system_prompt, build_revision_plan,
@@ -33,9 +34,13 @@ from knowledge.evaluation.run import (
     MAX_ITERATIONS, _count_high_priority_deviations, decide_feedback_outcome,
 )
 from knowledge.evaluation.schema import (
-    ActualStyleProfile, ComparisonResult, DimensionScore, EvalError,
-    FeatureDeviation, LiteraryEvaluation, NarrativeDeviation, RevisionItem,
-    RevisionPlan, RevisionResult, StrategyCoverage,
+    ASSESSMENT_INSUFFICIENT, ASSESSMENT_OBSERVED, FEEDBACK_ACCEPT,
+    FEEDBACK_CONTINUE, FEEDBACK_NO_ACTION, FEEDBACK_ROLL_BACK, INTEGRITY_CRITICAL,
+    INTEGRITY_WARNING, ActualStyleProfile, ComparisonResult,
+    ContentIntegrityResult, ContentIntegrityViolation, DimensionScore, EvalError,
+    EvaluationPolicy, FeatureDeviation, FeedbackDecision, LiteraryEvaluation,
+    NarrativeDeviation, RevisionItem, RevisionPlan, RevisionResult,
+    StrategyCoverage,
 )
 from knowledge.generation.schema import (
     IMITATION_INSTRUCTION_TOKENS, assert_no_author_identity,
@@ -47,7 +52,11 @@ from knowledge.planning.schema import (
 )
 from knowledge.profiles.style_profile import AuthorStyleProfileSynthesizer
 from knowledge.providers.llm_provider import DummyLLMProvider, UnconfiguredLLMProvider
-from knowledge.schema.versions import EVALUATION_SCHEMA_VERSION, STYLE_PLAN_SCHEMA_VERSION
+from knowledge.schema.versions import (
+    CONTENT_INTEGRITY_VERSION, EVALUATION_SCHEMA_VERSION,
+    FEEDBACK_DECISION_SCHEMA_VERSION, LITERARY_EVALUATION_SCHEMA_VERSION,
+    STYLE_PLAN_SCHEMA_VERSION,
+)
 from knowledge.stylometry.extract import StylometricVectorizer
 
 TEXT = "She walked alone at dusk. The garden was quiet. She remembered him clearly."
@@ -216,12 +225,13 @@ def test_schema_round_trips():
     assert ComparisonResult.from_dict(cmp_).to_dict() == cmp_
 
     ev = LiteraryEvaluation(
-        schema_version=EVALUATION_SCHEMA_VERSION, author_id="austen", passage_id="p1",
+        schema_version=LITERARY_EVALUATION_SCHEMA_VERSION, author_id="austen",
+        passage_id="p1",
         dimensions={"plot_logic": DimensionScore(
             dimension="plot_logic", label="Plot Logic", score=7.5, summary="s",
             strength="st", weakness="w", evidence=["e"])},
         weights={"plot_logic": 1.0}, total_score=7.5, summary="ok", blind=True,
-        evaluator_version="0.1.0")
+        evaluator_version="0.2.0")
     assert LiteraryEvaluation.from_dict(ev.to_dict()).total_score == 7.5
 
     item = RevisionItem(priority="P3", category="language", target="f",
@@ -236,6 +246,44 @@ def test_schema_round_trips():
         original_passage_hash="a", revised_passage_hash="b", revised_text="t",
         change_descriptions=["d"], revision_items_applied=["P3:f"])
     assert RevisionResult.from_dict(res.to_dict()).revised_text == "t"
+
+
+def test_phase_81_schema_round_trips():
+    pol = EvaluationPolicy(max_literary_drop=0.5, weak_score_threshold=5.0)
+    assert EvaluationPolicy.from_dict(pol.to_dict()).max_literary_drop == 0.5
+
+    v = ContentIntegrityViolation("plot_facts", INTEGRITY_CRITICAL, "changed a fact")
+    assert ContentIntegrityViolation.from_dict(v.to_dict()).kind == "plot_facts"
+
+    ci = ContentIntegrityResult(
+        schema_version=EVALUATION_SCHEMA_VERSION,
+        checker_version=CONTENT_INTEGRITY_VERSION, passed=True,
+        plot_facts_preserved=True, characters_preserved=True,
+        relationships_preserved=True, constraints_preserved=True,
+        new_major_events=False, removed_major_events=False,
+        violations=[v], reasoning_summary="ok", deterministic=False, blind=True)
+    assert ContentIntegrityResult.from_dict(ci.to_dict()).passed is True
+
+    d = FeedbackDecision(
+        schema_version=FEEDBACK_DECISION_SCHEMA_VERSION, outcome=FEEDBACK_ACCEPT,
+        reason="resolved", content_integrity_passed=True,
+        content_integrity=ci.to_dict(),
+        style_fidelity={"high_priority_deviations_before": 2,
+                        "high_priority_deviations_after": 0, "improved": True},
+        literary_quality={"before": 8.0, "after": 8.0, "drop": 0.0,
+                          "max_literary_drop": 0.5, "drop_exceeded": False,
+                          "evaluated": True},
+        iteration=1, max_iterations=2, author_id="austen", passage_id="p1")
+    assert FeedbackDecision.from_dict(d.to_dict()).outcome == FEEDBACK_ACCEPT
+
+
+def test_dimension_score_backward_compatible_defaults():
+    # 旧字段缺失时（无 assessment_status / verified_evidence_count）→ 向后兼容默认。
+    d = {"dimension": "plot_logic", "label": "Plot Logic", "score": 7.0,
+         "summary": "s", "strength": "st", "weakness": "w", "evidence": ["a", "b"]}
+    ds = DimensionScore.from_dict(d)
+    assert ds.assessment_status == ASSESSMENT_OBSERVED
+    assert ds.verified_evidence_count == 2
 
 
 def test_schema_version_guard_rejects_wrong_version():
@@ -261,6 +309,20 @@ def test_schema_version_guard_rejects_wrong_version():
             "original_passage_hash": "a", "revised_passage_hash": "b",
             "revised_text": "t", "change_descriptions": [],
             "revision_items_applied": [], "blind": True, "rewriter_version": "v",
+        },
+        ContentIntegrityResult: {
+            "schema_version": "999.0.0", "checker_version": "v", "passed": True,
+            "plot_facts_preserved": True, "characters_preserved": True,
+            "relationships_preserved": True, "constraints_preserved": True,
+            "new_major_events": False, "removed_major_events": False,
+            "violations": [], "reasoning_summary": "s", "deterministic": False,
+            "blind": True,
+        },
+        FeedbackDecision: {
+            "schema_version": "999.0.0", "outcome": "accept", "reason": "r",
+            "content_integrity_passed": None, "content_integrity": None,
+            "style_fidelity": {}, "literary_quality": {}, "iteration": 1,
+            "max_iterations": 2,
         },
     }
     for cls, d in cases.items():
@@ -311,6 +373,42 @@ def test_literary_evaluator_evidence_verified():
 def test_literary_evaluator_unconfigured_returns_unavailable():
     out = LiteraryEvaluator(UnconfiguredLLMProvider()).evaluate(TEXT)
     assert isinstance(out, AnalysisUnavailable)
+
+
+def test_literary_insufficient_dim_excluded_from_total():
+    # plot_logic 的 evidence 全部无法逐字验证 → insufficient_evidence，不进加权总分。
+    raw = json.loads(_eval_response())
+    raw["dimensions"]["plot_logic"]["evidence"] = ["a fabricated quote"]
+    prov = RecordingProvider(json.dumps(raw))
+    out = LiteraryEvaluator(prov).evaluate(TEXT)
+    assert isinstance(out, LiteraryEvaluation)
+    dim = out.dimensions["plot_logic"]
+    assert dim.assessment_status == ASSESSMENT_INSUFFICIENT
+    assert dim.verified_evidence_count == 0
+    # 其余 5 维 observed，总分只在这些维度上加权。
+    observed = [d for d in out.dimensions.values()
+                if d.assessment_status == ASSESSMENT_OBSERVED]
+    assert len(observed) == 5
+
+
+def test_literary_all_insufficient_returns_unavailable():
+    # 6 维证据全部验证失败 → 整体 unavailable，绝不返回伪总分。
+    raw = json.loads(_eval_response())
+    for dim in raw["dimensions"].values():
+        dim["evidence"] = ["a fabricated quote"]
+    prov = RecordingProvider(json.dumps(raw))
+    out = LiteraryEvaluator(prov).evaluate(TEXT)
+    assert isinstance(out, AnalysisUnavailable)
+
+
+def test_literary_extra_dimension_rejected():
+    # 严格 exactly-six：多余未知维度 → reject（绝不 silent ignore）。
+    raw = json.loads(_eval_response())
+    raw["dimensions"]["mystery_dim"] = {"score": 8, "summary": "s", "strength": "st",
+                                        "weakness": "w", "evidence": ["e"]}
+    prov = RecordingProvider(json.dumps(raw))
+    with pytest.raises(LLMResponseError):
+        LiteraryEvaluator(prov).evaluate(TEXT)
 
 
 # --------------------------------------------------------------------------- #
@@ -469,6 +567,99 @@ def test_rewriter_author_name_leak_fails_closed():
 
 
 # --------------------------------------------------------------------------- #
+# ContentIntegrityChecker（Phase 8.1）
+# --------------------------------------------------------------------------- #
+_CI_OK = json.dumps({
+    "plot_facts_preserved": True, "characters_preserved": True,
+    "relationships_preserved": True, "constraints_preserved": True,
+    "new_major_events": False, "removed_major_events": False,
+    "violations": [], "summary": "no content changed",
+})
+
+
+def test_integrity_identical_text_passes_deterministically():
+    prov = RecordingProvider("")
+    out = ContentIntegrityChecker(prov).check(TEXT, TEXT, _REQUEST)
+    assert isinstance(out, ContentIntegrityResult)
+    assert out.passed is True and out.deterministic is True
+    assert prov.messages == []  # 零 token 短路
+
+
+def test_integrity_empty_revised_fails_deterministically():
+    prov = RecordingProvider("")
+    out = ContentIntegrityChecker(prov).check(TEXT, "   ", _REQUEST)
+    assert isinstance(out, ContentIntegrityResult)
+    assert out.passed is False and out.deterministic is True
+    assert out.removed_major_events is True
+    assert any(v.kind == "removed_event" and v.severity == INTEGRITY_CRITICAL
+               for v in out.violations)
+    assert prov.messages == []
+
+
+def test_integrity_llm_passed():
+    prov = RecordingProvider(_CI_OK)
+    out = ContentIntegrityChecker(prov).check(TEXT, "She walked alone. The garden quieted.", _REQUEST)
+    assert isinstance(out, ContentIntegrityResult)
+    assert out.passed is True and out.deterministic is False
+    assert out.new_major_events is False and out.removed_major_events is False
+
+
+def test_integrity_llm_fail_on_removed_event():
+    raw = json.loads(_CI_OK)
+    raw["removed_major_events"] = True
+    raw["violations"] = [{"kind": "removed_event", "severity": INTEGRITY_CRITICAL,
+                          "description": "removed the garden scene"}]
+    prov = RecordingProvider(json.dumps(raw))
+    out = ContentIntegrityChecker(prov).check(TEXT, "She walked alone.", _REQUEST)
+    assert isinstance(out, ContentIntegrityResult)
+    assert out.passed is False
+    assert out.removed_major_events is True
+
+
+def test_integrity_non_bool_rejected():
+    raw = json.loads(_CI_OK)
+    raw["characters_preserved"] = "yes"  # 非法：必须是 boolean
+    prov = RecordingProvider(json.dumps(raw))
+    with pytest.raises(LLMResponseError):
+        ContentIntegrityChecker(prov).check(TEXT, "changed", _REQUEST)
+
+
+def test_integrity_bad_violation_kind_rejected():
+    raw = json.loads(_CI_OK)
+    raw["violations"] = [{"kind": "style_issue", "severity": INTEGRITY_CRITICAL,
+                          "description": "x"}]
+    prov = RecordingProvider(json.dumps(raw))
+    with pytest.raises(LLMResponseError):
+        ContentIntegrityChecker(prov).check(TEXT, "changed", _REQUEST)
+
+
+def test_integrity_unconfigured_returns_unavailable():
+    out = ContentIntegrityChecker(UnconfiguredLLMProvider()).check(TEXT, "changed", _REQUEST)
+    assert isinstance(out, AnalysisUnavailable)
+
+
+def test_integrity_prompt_is_blind():
+    prov = RecordingProvider(_CI_OK)
+    ContentIntegrityChecker(prov, blind=True).check(
+        "She walked alone at dusk.", "She walked alone at dusk, quietly.", _REQUEST,
+        author_names=["Jane Austen"])
+    system = prov.messages[0][0]["content"]
+    user = prov.messages[0][1]["content"]
+    for tok in IMITATION_INSTRUCTION_TOKENS:
+        assert tok not in system.lower()
+    assert "austen" not in (system + user).lower()
+
+
+def test_integrity_author_name_in_text_fails_closed():
+    # 若正文本身含作者身份名，泄露守卫 fail-closed（绝不发送）。
+    prov = RecordingProvider(_CI_OK)
+    with pytest.raises(EvalError):
+        ContentIntegrityChecker(prov).check(
+            "Jane Austen wrote this.", "Jane Austen wrote this, too.", _REQUEST,
+            author_names=["Jane Austen"])
+
+
+# --------------------------------------------------------------------------- #
 # decide_feedback_outcome
 # --------------------------------------------------------------------------- #
 def _cmp(n_lang=0, n_narr=0, n_strat=0):
@@ -487,19 +678,96 @@ def _cmp(n_lang=0, n_narr=0, n_strat=0):
     )
 
 
+def _ci(passed=True, *, removed=False, new=False, violations=None):
+    return ContentIntegrityResult(
+        schema_version=EVALUATION_SCHEMA_VERSION,
+        checker_version=CONTENT_INTEGRITY_VERSION, passed=passed,
+        plot_facts_preserved=passed, characters_preserved=passed,
+        relationships_preserved=passed, constraints_preserved=passed,
+        new_major_events=new, removed_major_events=removed,
+        violations=violations or [], reasoning_summary="ok",
+        deterministic=False, blind=True)
+
+
 def test_decide_feedback_outcome_rules():
     # after None → roll_back
-    assert decide_feedback_outcome(_cmp(1), None)[0] == "roll_back"
+    assert decide_feedback_outcome(_cmp(1), None).outcome == FEEDBACK_ROLL_BACK
     # 零高优先级偏差 → accept
-    assert decide_feedback_outcome(_cmp(1), _cmp(0))[0] == "accept"
+    assert decide_feedback_outcome(_cmp(1), _cmp(0)).outcome == FEEDBACK_ACCEPT
     # 改善且未达上限 → continue
     assert decide_feedback_outcome(_cmp(3), _cmp(1), iteration=1,
-                                   max_iterations=2)[0] == "continue"
+                                   max_iterations=2).outcome == FEEDBACK_CONTINUE
     # 改善但已达上限 → accept
     assert decide_feedback_outcome(_cmp(3), _cmp(1), iteration=2,
-                                   max_iterations=2)[0] == "accept"
+                                   max_iterations=2).outcome == FEEDBACK_ACCEPT
     # 未改善 → roll_back
-    assert decide_feedback_outcome(_cmp(1), _cmp(2))[0] == "roll_back"
+    assert decide_feedback_outcome(_cmp(1), _cmp(2)).outcome == FEEDBACK_ROLL_BACK
+
+
+def test_decide_no_action_when_no_revision():
+    # 改写计划为空 → no_action，独立于 roll_back（不是"回滚"）。
+    d = decide_feedback_outcome(_cmp(2), None, no_revision=True)
+    assert d.outcome == FEEDBACK_NO_ACTION
+    assert d.content_integrity_passed is None
+    assert d.content_integrity is None
+    assert d.literary_quality["evaluated"] is False
+
+
+def test_decide_integrity_violation_rolls_back_even_if_style_improved():
+    # STEP 1 最高 gate：内容破坏 → roll_back，即便风格偏差减少（P1/P2/P3 全改善）。
+    ci = _ci(passed=False, removed=True)
+    d = decide_feedback_outcome(
+        _cmp(3), _cmp(1), content_integrity=ci,
+        literary_before=8.0, literary_after=8.0)
+    assert d.outcome == FEEDBACK_ROLL_BACK
+    assert d.content_integrity_passed is False
+    assert "integrity" in d.reason.lower()
+
+
+def test_decide_literary_drop_rolls_back():
+    # STEP 2：文学总分下降超过容忍度 → roll_back（即便风格改善）。
+    d = decide_feedback_outcome(
+        _cmp(3), _cmp(1), content_integrity=_ci(passed=True),
+        literary_before=8.0, literary_after=5.0)
+    assert d.outcome == FEEDBACK_ROLL_BACK
+    assert d.literary_quality["drop_exceeded"] is True
+    assert d.literary_quality["drop"] == pytest.approx(3.0)
+
+
+def test_decide_literary_drop_within_tolerance_continues():
+    # 文学下降在容忍度内 + 风格改善 → continue（不阻断）。
+    d = decide_feedback_outcome(
+        _cmp(3), _cmp(1), content_integrity=_ci(passed=True),
+        literary_before=8.0, literary_after=7.7)
+    assert d.outcome == FEEDBACK_CONTINUE
+    assert d.literary_quality["drop_exceeded"] is False
+
+
+def test_decide_literary_guard_skipped_when_unavailable():
+    # literary_before/after 为 None → 文学 guard 不阻断，进入风格 gate。
+    d = decide_feedback_outcome(_cmp(1), _cmp(0))
+    assert d.outcome == FEEDBACK_ACCEPT
+    assert d.literary_quality["evaluated"] is False
+
+
+def test_decide_custom_tolerance_configurable():
+    # max_literary_drop 可配置（非科学真值）：调大容忍度后不再 roll_back。
+    policy = EvaluationPolicy(max_literary_drop=5.0)
+    d = decide_feedback_outcome(
+        _cmp(3), _cmp(1), content_integrity=_ci(passed=True),
+        literary_before=8.0, literary_after=5.0, policy=policy)
+    assert d.outcome == FEEDBACK_CONTINUE
+
+
+def test_decide_reports_style_and_literary_separately():
+    # 绝不合并成单一加权总分：style_fidelity 与 literary_quality 分别报告。
+    d = decide_feedback_outcome(
+        _cmp(3), _cmp(1), content_integrity=_ci(passed=True),
+        literary_before=8.0, literary_after=7.7)
+    assert "high_priority_deviations_before" in d.style_fidelity
+    assert "high_priority_deviations_after" in d.style_fidelity
+    assert "before" in d.literary_quality and "after" in d.literary_quality
+    assert "weighted_total" not in d.literary_quality
 
 
 def test_high_priority_count_excludes_p0_p4():

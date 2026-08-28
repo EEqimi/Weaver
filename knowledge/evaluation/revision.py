@@ -27,8 +27,8 @@ from ..planning.schema import StylePlan
 from ..providers.llm_provider import LLMProvider, cache_key
 from ..schema.versions import EVALUATION_SCHEMA_VERSION, REVISION_REWRITER_VERSION
 from .schema import (
-    ComparisonResult, EvalError, LiteraryEvaluation, RevisionItem, RevisionPlan,
-    RevisionResult, priority_rank,
+    ComparisonResult, EvalError, EvaluationPolicy, LiteraryEvaluation,
+    RevisionItem, RevisionPlan, RevisionResult, priority_rank,
 )
 
 ANALYZER_ID = "RevisionRewriter"
@@ -52,8 +52,9 @@ _EVAL_DIM_CATEGORY: dict[str, str] = {
     "emotional_resonance": "language",
 }
 
-# 低于此分的文学维度产生一条改写项（1–10 量表，5 = 中位）。
-DEFAULT_WEAK_SCORE_THRESHOLD = 5.0
+# 低于此分的文学维度产生一条改写项（1–10 量表，5 = 中位）。统一从 EvaluationPolicy 取，
+# 不散落硬编码常数（spec §二 STEP 2）。
+DEFAULT_WEAK_SCORE_THRESHOLD = EvaluationPolicy().weak_score_threshold
 
 
 # --------------------------------------------------------------------------- #

@@ -17,10 +17,10 @@ from __future__ import annotations
 from ..analysis.base import AnalysisUnavailable, LLMResponseError, parse_json_response
 from ..analysis.evidence import verify_evidence_quotes
 from ..providers.llm_provider import LLMProvider, cache_key
-from ..schema.versions import EVALUATION_SCHEMA_VERSION, LITERARY_EVALUATOR_VERSION
+from ..schema.versions import LITERARY_EVALUATION_SCHEMA_VERSION, LITERARY_EVALUATOR_VERSION
 from .schema import (
-    DEFAULT_DIMENSION_WEIGHTS, LITERARY_DIMENSIONS, DimensionScore,
-    LiteraryEvaluation,
+    ASSESSMENT_INSUFFICIENT, ASSESSMENT_OBSERVED, DEFAULT_DIMENSION_WEIGHTS,
+    LITERARY_DIMENSIONS, DimensionScore, LiteraryEvaluation,
 )
 
 ANALYZER_ID = "LiteraryEvaluator"
@@ -75,13 +75,21 @@ class LiteraryEvaluator:
         ]
         key = cache_key(
             text=text, analyzer_id=ANALYZER_ID, analyzer_version=ANALYZER_VERSION,
-            schema_version=EVALUATION_SCHEMA_VERSION, model=self._provider.model,
+            schema_version=LITERARY_EVALUATION_SCHEMA_VERSION, model=self._provider.model,
             provider_id=self._provider.provider_id,
             prompt_name=f"literary_evaluation:blind={self.blind}",
         )
         raw = self._provider.complete(messages, cache_hint=key)
         data = parse_json_response(raw)
-        return self._to_evaluation(author_id, passage_id, text, data)
+        evaluation = self._to_evaluation(author_id, passage_id, text, data)
+        # 全部维度 evidence 验证失败 → 整体判为 unavailable，绝不返回伪总分。
+        if evaluation.dimensions and all(
+                d.assessment_status == ASSESSMENT_INSUFFICIENT
+                for d in evaluation.dimensions.values()):
+            return AnalysisUnavailable(
+                "literary_evaluation", ANALYZER_ID, ANALYZER_VERSION,
+                "全部文学维度证据验证失败（无逐字证据），拒绝给出伪总分")
+        return evaluation
 
     # ------------------------------------------------------------------ #
     def _to_evaluation(self, author_id: str, passage_id: str, text: str,
@@ -89,6 +97,12 @@ class LiteraryEvaluator:
         raw_dims = data.get("dimensions")
         if not isinstance(raw_dims, dict):
             raise LLMResponseError("literary_evaluation 的 dimensions 必须是对象")
+
+        # 严格 exactly-six：缺维度 reject；多余未知维度 reject（绝不 silent ignore）。
+        known = {dim_id for dim_id, _ in LITERARY_DIMENSIONS}
+        extra = sorted(set(raw_dims) - known)
+        if extra:
+            raise LLMResponseError(f"literary_evaluation 含未知维度 {extra}")
 
         dimensions: dict[str, DimensionScore] = {}
         for dim_id, label in LITERARY_DIMENSIONS:
@@ -103,7 +117,7 @@ class LiteraryEvaluator:
 
         total = self._weighted_total(dimensions)
         return LiteraryEvaluation(
-            schema_version=EVALUATION_SCHEMA_VERSION,
+            schema_version=LITERARY_EVALUATION_SCHEMA_VERSION,
             author_id=author_id, passage_id=passage_id,
             dimensions=dimensions, weights=self.weights,
             total_score=total, summary=summary.strip(),
@@ -138,19 +152,24 @@ class LiteraryEvaluator:
             raise LLMResponseError(f"维度 {dim_id} 的 evidence 必须是字符串列表")
         check = verify_evidence_quotes(raw_evidence, text)
         evidence = [e for e in check.verified if isinstance(e, str)]
+        # evidence contract：至少 1 条逐字验证证据 → observed；否则 insufficient_evidence。
+        assessment = ASSESSMENT_OBSERVED if evidence else ASSESSMENT_INSUFFICIENT
 
         return DimensionScore(
             dimension=dim_id, label=label, score=score, summary=summary,
             strength=strength, weakness=weakness, evidence=evidence,
+            assessment_status=assessment, verified_evidence_count=len(evidence),
         )
 
     def _weighted_total(self, dimensions: dict[str, DimensionScore]) -> float:
         total_w = 0.0
         weighted = 0.0
         for dim_id, dim in dimensions.items():
+            if dim.assessment_status != ASSESSMENT_OBSERVED:
+                continue   # insufficient_evidence 维度不进加权总分
             w = float(self.weights.get(dim_id, 0.0))
             weighted += dim.score * w
             total_w += w
         if total_w <= 0.0:
-            return round(sum(d.score for d in dimensions.values()) / len(dimensions), 2)
+            return 0.0   # 无有效维度；调用方会整体判为 unavailable
         return round(weighted / total_w, 2)

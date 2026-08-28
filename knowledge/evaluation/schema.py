@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..schema.versions import (
-    EVALUATION_SCHEMA_VERSION, LITERARY_EVALUATOR_VERSION, REVISION_REWRITER_VERSION,
+    CONTENT_INTEGRITY_VERSION, EVALUATION_SCHEMA_VERSION,
+    FEEDBACK_DECISION_SCHEMA_VERSION, LITERARY_EVALUATION_SCHEMA_VERSION,
+    LITERARY_EVALUATOR_VERSION, REVISION_REWRITER_VERSION,
 )
 
 # 6 个文学评价维度（独立 LLM 文学评价，README_AGENTS "评价迭代器"）。
@@ -54,6 +56,26 @@ CATEGORY_TO_PRIORITY: dict[str, str] = {
     "stylometric": "P4",
 }
 
+# 文学维度评估状态（Phase 8.1 evidence contract）：至少 1 条逐字验证证据 → observed；
+# 证据全部验证失败 → insufficient_evidence（该维不进加权总分）。
+ASSESSMENT_OBSERVED = "observed"
+ASSESSMENT_INSUFFICIENT = "insufficient_evidence"
+ASSESSMENT_STATUSES: tuple[str, ...] = (ASSESSMENT_OBSERVED, ASSESSMENT_INSUFFICIENT)
+
+# 反馈决策结果（Phase 8.1 语义）：no_action 独立于 roll_back（改写计划为空 = 未执行任何
+# 改写，不是"回滚"）。
+FEEDBACK_ACCEPT = "accept"
+FEEDBACK_CONTINUE = "continue"
+FEEDBACK_ROLL_BACK = "roll_back"
+FEEDBACK_NO_ACTION = "no_action"
+FEEDBACK_OUTCOMES: tuple[str, ...] = (
+    FEEDBACK_ACCEPT, FEEDBACK_CONTINUE, FEEDBACK_ROLL_BACK, FEEDBACK_NO_ACTION,
+)
+
+# 内容完整性违规严重度：critical 使 passed=False；warning 仅记录不阻断。
+INTEGRITY_CRITICAL = "critical"
+INTEGRITY_WARNING = "warning"
+
 
 class EvalError(Exception):
     """evaluation 失败（provider 未配置 / 传输失败 / schema 校验失败 / 泄露等）。"""
@@ -65,10 +87,11 @@ def _require(d: dict[str, Any], *keys: str) -> None:
         raise EvalError(f"缺少必填字段: {missing}")
 
 
-def _guard_version(d: dict[str, Any]) -> None:
-    if d.get("schema_version") != EVALUATION_SCHEMA_VERSION:
+def _guard_version(d: dict[str, Any],
+                   expected: str = EVALUATION_SCHEMA_VERSION) -> None:
+    if d.get("schema_version") != expected:
         raise EvalError(
-            f"schema_version 不匹配: 期望 {EVALUATION_SCHEMA_VERSION}, "
+            f"schema_version 不匹配: 期望 {expected}, "
             f"得到 {d.get('schema_version')!r}")
 
 
@@ -256,7 +279,11 @@ class ActualStyleProfile:
 # --------------------------------------------------------------------------- #
 @dataclass
 class DimensionScore:
-    """单维文学评价：1–10 分 + 简述 + 至少一个优点 + 至少一个缺点 + 证据引文。"""
+    """单维文学评价：1–10 分 + 简述 + 至少一个优点 + 至少一个缺点 + 逐字证据引文。
+
+    Phase 8.1 evidence contract：`assessment_status` 区分 `observed`（≥1 条逐字验证
+    证据）与 `insufficient_evidence`（证据全部验证失败，该维不进加权总分）。
+    """
     dimension: str
     label: str
     score: float                       # 1–10
@@ -264,12 +291,16 @@ class DimensionScore:
     strength: str
     weakness: str
     evidence: list[str] = field(default_factory=list)   # 逐字引文（校验后）
+    assessment_status: str = ASSESSMENT_OBSERVED        # observed / insufficient_evidence
+    verified_evidence_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "dimension": self.dimension, "label": self.label, "score": self.score,
             "summary": self.summary, "strength": self.strength,
             "weakness": self.weakness, "evidence": list(self.evidence),
+            "assessment_status": self.assessment_status,
+            "verified_evidence_count": self.verified_evidence_count,
         }
 
     @classmethod
@@ -280,6 +311,9 @@ class DimensionScore:
             dimension=d["dimension"], label=d["label"], score=d["score"],
             summary=d["summary"], strength=d["strength"], weakness=d["weakness"],
             evidence=list(d["evidence"]),
+            assessment_status=d.get("assessment_status", ASSESSMENT_OBSERVED),
+            verified_evidence_count=d.get("verified_evidence_count",
+                                          len(list(d["evidence"]))),
         )
 
 
@@ -313,7 +347,7 @@ class LiteraryEvaluation:
     def from_dict(cls, d: dict[str, Any]) -> "LiteraryEvaluation":
         _require(d, "schema_version", "author_id", "passage_id", "dimensions",
                  "weights", "total_score", "summary", "blind", "evaluator_version")
-        _guard_version(d)
+        _guard_version(d, LITERARY_EVALUATION_SCHEMA_VERSION)
         return cls(
             schema_version=d["schema_version"], author_id=d["author_id"],
             passage_id=d["passage_id"],
@@ -426,4 +460,159 @@ class RevisionResult:
             change_descriptions=list(d["change_descriptions"]),
             revision_items_applied=list(d["revision_items_applied"]),
             blind=d["blind"], rewriter_version=d["rewriter_version"],
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8.1：评价策略 + 内容完整性 + 反馈决策
+# --------------------------------------------------------------------------- #
+@dataclass
+class EvaluationPolicy:
+    """可配置决策策略（统一配置，不散落硬编码常数；spec §二 STEP 2）。
+
+    `max_literary_drop`：文学总分允许的最大下降（超过 → roll_back）。默认 0.5 是合理
+    经验值，绝非科学真值，且可配置、有文档、有测试。
+    """
+    max_literary_drop: float = 0.5
+    weak_score_threshold: float = 5.0   # 文学维度低于此分产生一条改写项
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"max_literary_drop": self.max_literary_drop,
+                "weak_score_threshold": self.weak_score_threshold}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "EvaluationPolicy":
+        return cls(
+            max_literary_drop=float(d.get("max_literary_drop", 0.5)),
+            weak_score_threshold=float(d.get("weak_score_threshold", 5.0)),
+        )
+
+
+@dataclass
+class ContentIntegrityViolation:
+    """一条内容完整性违规（critical 阻断；warning 仅记录）。"""
+    kind: str          # plot_facts / characters / relationships / constraints /
+                       # new_event / removed_event
+    severity: str      # critical / warning
+    description: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind, "severity": self.severity,
+                "description": self.description}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ContentIntegrityViolation":
+        _require(d, "kind", "severity", "description")
+        return cls(kind=d["kind"], severity=d["severity"],
+                   description=d["description"])
+
+
+@dataclass
+class ContentIntegrityResult:
+    """内容完整性检查结果：改写是否破坏用户内容（plot/角色/关系/约束/事件增删）。"""
+    schema_version: str
+    checker_version: str
+    passed: bool
+    plot_facts_preserved: bool
+    characters_preserved: bool
+    relationships_preserved: bool
+    constraints_preserved: bool
+    new_major_events: bool              # True = 违规（新增主要事件）
+    removed_major_events: bool          # True = 违规（删除主要事件）
+    violations: list[ContentIntegrityViolation] = field(default_factory=list)
+    reasoning_summary: str = ""         # 简短，绝不保存 hidden chain-of-thought
+    deterministic: bool = False         # True = 确定性短路判定（未调 LLM）
+    blind: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "checker_version": self.checker_version,
+            "passed": self.passed,
+            "plot_facts_preserved": self.plot_facts_preserved,
+            "characters_preserved": self.characters_preserved,
+            "relationships_preserved": self.relationships_preserved,
+            "constraints_preserved": self.constraints_preserved,
+            "new_major_events": self.new_major_events,
+            "removed_major_events": self.removed_major_events,
+            "violations": [v.to_dict() for v in self.violations],
+            "reasoning_summary": self.reasoning_summary,
+            "deterministic": self.deterministic,
+            "blind": self.blind,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ContentIntegrityResult":
+        _require(d, "schema_version", "checker_version", "passed",
+                 "plot_facts_preserved", "characters_preserved",
+                 "relationships_preserved", "constraints_preserved",
+                 "new_major_events", "removed_major_events", "violations",
+                 "reasoning_summary", "deterministic", "blind")
+        _guard_version(d)
+        return cls(
+            schema_version=d["schema_version"],
+            checker_version=d["checker_version"],
+            passed=d["passed"],
+            plot_facts_preserved=d["plot_facts_preserved"],
+            characters_preserved=d["characters_preserved"],
+            relationships_preserved=d["relationships_preserved"],
+            constraints_preserved=d["constraints_preserved"],
+            new_major_events=d["new_major_events"],
+            removed_major_events=d["removed_major_events"],
+            violations=[ContentIntegrityViolation.from_dict(v)
+                        for v in d["violations"]],
+            reasoning_summary=d["reasoning_summary"],
+            deterministic=d["deterministic"],
+            blind=d["blind"],
+        )
+
+
+@dataclass
+class FeedbackDecision:
+    """反馈决策（可审计）：Style Fidelity 与 Literary Quality 分别报告，绝不合并成
+    单一加权总分。决策基于 gate/规则，而非一个神秘加权分。"""
+    schema_version: str
+    outcome: str                       # accept / continue / roll_back / no_action
+    reason: str
+    content_integrity_passed: bool | None      # None = 未运行（no_action / 改写失败）
+    content_integrity: dict[str, Any] | None   # ContentIntegrityResult.to_dict() 或 None
+    style_fidelity: dict[str, Any]             # {before_n, after_n, improved}
+    literary_quality: dict[str, Any]           # {before, after, drop, tolerance,
+                                               #  drop_exceeded, evaluated}
+    iteration: int
+    max_iterations: int
+    author_id: str = ""
+    passage_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "outcome": self.outcome,
+            "reason": self.reason,
+            "content_integrity_passed": self.content_integrity_passed,
+            "content_integrity": self.content_integrity,
+            "style_fidelity": self.style_fidelity,
+            "literary_quality": self.literary_quality,
+            "iteration": self.iteration,
+            "max_iterations": self.max_iterations,
+            "author_id": self.author_id,
+            "passage_id": self.passage_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "FeedbackDecision":
+        _require(d, "schema_version", "outcome", "reason",
+                 "content_integrity_passed", "content_integrity",
+                 "style_fidelity", "literary_quality", "iteration",
+                 "max_iterations")
+        _guard_version(d, FEEDBACK_DECISION_SCHEMA_VERSION)
+        return cls(
+            schema_version=d["schema_version"], outcome=d["outcome"],
+            reason=d["reason"],
+            content_integrity_passed=d["content_integrity_passed"],
+            content_integrity=d["content_integrity"],
+            style_fidelity=d["style_fidelity"],
+            literary_quality=d["literary_quality"],
+            iteration=d["iteration"], max_iterations=d["max_iterations"],
+            author_id=d.get("author_id", ""), passage_id=d.get("passage_id", ""),
         )
