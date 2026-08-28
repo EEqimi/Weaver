@@ -775,6 +775,36 @@ def test_high_priority_count_excludes_p0_p4():
     assert _count_high_priority_deviations(_cmp(0, 0, 0)) == 0
 
 
+def test_decide_literary_after_unavailable_rolls_back_even_if_style_improved():
+    # 基线有效 + 改写后文学评价 unavailable + 风格改善 → 仍 roll_back（无法验证文学保留）。
+    d = decide_feedback_outcome(
+        _cmp(3), _cmp(1), content_integrity=_ci(passed=True),
+        literary_before=8.0, literary_after=None)
+    assert d.outcome == FEEDBACK_ROLL_BACK
+    assert "post-revision literary evaluation unavailable" in d.reason
+    assert d.literary_quality["guard"] == "unavailable"
+    assert d.literary_quality["evaluated"] is False
+    assert d.literary_quality["after"] is None   # 绝不把 unavailable 转成 0 分
+
+
+def test_decide_literary_after_unavailable_rolls_back_even_if_style_perfect():
+    # 即便风格偏差归零（perfect），只要文学无法验证 → roll_back。
+    d = decide_feedback_outcome(
+        _cmp(3), _cmp(0), content_integrity=_ci(passed=True),
+        literary_before=8.0, literary_after=None)
+    assert d.outcome == FEEDBACK_ROLL_BACK
+
+
+def test_decide_literary_before_unavailable_marks_guard_unavailable():
+    # 基线本身 unavailable → 不伪造基线，允许走 Style Fidelity，但显式标记 guard 不可用。
+    d = decide_feedback_outcome(_cmp(2), _cmp(0),
+                                literary_before=None, literary_after=None)
+    assert d.outcome == FEEDBACK_ACCEPT
+    assert d.literary_quality["guard"] == "unavailable"
+    assert d.literary_quality["evaluated"] is False
+    assert d.literary_quality["before"] is None and d.literary_quality["after"] is None
+
+
 # --------------------------------------------------------------------------- #
 # measure_actual_profile（Layer A 统计 + Layer D 诊断，合成 fixture）
 # --------------------------------------------------------------------------- #

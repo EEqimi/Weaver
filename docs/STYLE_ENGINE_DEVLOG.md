@@ -1280,6 +1280,69 @@ Accept / Continue / Roll Back；并加**独立**的 6 维 LLM 文学评价（1�
 
 ---
 
+## Checkpoint — Phase 8.1: Evaluation Decision Integrity & Revision Safety（零 token）
+
+**Status:** COMPLETE — 真实 deepseek-chat 验证待批（未跑，`evaluation_v2` 未生成）
+
+### Goal
+修复 Phase 8 决策与改写的四类完整性缺陷（spec §一）：
+1. 决策只看风格偏差数量、忽略文学质量（风格改善可能掩盖文学分 8.2→5.1 的崩塌）；
+2. 文学分在无逐字验证证据时仍算有效；
+3. 改写只"告诉"模型别改情节/事实/角色，却不验证它确实没改；
+4. 空改写计划被误判为 roll_back，而非 `no_action`。
+
+范围（明确**非** Phase 9，无多轮自动循环）：决策质量 gate、文学评价证据契约、
+改写后内容完整性检查、no_action 语义。
+
+### 决策 gate 顺序（spec §四/§五，Style 与 Literary **分别报告**，绝不合并加权分）
+- **STEP 1 — Content Integrity（最高）**：改写破坏内容 → `roll_back`。
+- **STEP 2 — Literary Quality guard**：`max_literary_drop` 可配置容忍度（默认 0.5，
+  非科学真值）；超限 → `roll_back`。**fail-closed 边界**：基线有效但改写后文学评价
+  unavailable（如 6 维证据契约全失败）→ 无法验证文学保留，绝不单凭 Style Fidelity
+  接受，直接 `roll_back`（"post-revision literary evaluation unavailable"）；基线本身
+  unavailable → 不伪造基线，可走 Style Fidelity，但 `literary_quality.guard="unavailable"`
+  显式标记。
+- **STEP 3 — Style Fidelity**：改善 → `continue`/`accept`；未改善 → `roll_back`。
+- `no_action`：改写计划为空 → 独立于 `roll_back`。
+
+### Implementation
+- `knowledge/evaluation/schema.py` — `EvaluationPolicy`（`max_literary_drop` /
+  `weak_score_threshold`）、`ContentIntegrityViolation` / `ContentIntegrityResult`、
+  `FeedbackDecision`（`style_fidelity` 与 `literary_quality` 分开）；`DimensionScore`
+  加 `assessment_status`（observed / insufficient_evidence）+ `verified_evidence_count`
+  （向后兼容默认）；新增 `LITERARY_EVALUATION_SCHEMA_VERSION=0.2.0` /
+  `CONTENT_INTEGRITY_VERSION` / `FEEDBACK_DECISION_SCHEMA_VERSION` 常量。
+- `knowledge/evaluation/literary.py` — evidence contract：每维 ≥1 条逐字验证证据 →
+  observed，否则 insufficient_evidence（不进加权总分）；全维 insufficient → 整体
+  unavailable（拒绝伪总分）；严格 exactly-six（缺/多维度均 reject）。版本 bump
+  `LITERARY_EVALUATOR_VERSION=0.1.0→0.2.0` 以作废旧文学缓存。
+- `knowledge/evaluation/integrity.py` — `ContentIntegrityChecker`（盲测，无作者名、
+  不讨论风格）：确定性短路（零 token：一致→pass，空→fail）+ LLM 语义层严格 JSON
+  校验（boolean 必须 bool、kind/severity 枚举）；只存简短 reasoning_summary。
+- `knowledge/evaluation/run.py` — `decide_feedback_outcome` 返回 `FeedbackDecision`
+  （三阶 gate + no_action + fail-closed 文学边界）；`run_evaluation` 改写后**先**
+  Integrity 再重测（省 token），产物写 `data/analysis/evaluation_v2/`，LLM cache 复用
+  v1（原文再测量缓存命中，0 token）。
+- `knowledge/evaluation/revision.py` — `DEFAULT_WEAK_SCORE_THRESHOLD` 改从
+  `EvaluationPolicy().weak_score_threshold` 取（不再散落硬编码 5.0）。
+
+### Tests
+- **311 passed**（Phase 8 后 287 → 308 → +3 决策完整性边界 = 311）：+24 Phase 8.1 测试
+  （全确定性，Dummy provider，零 token）——新 schema 往返/版本守卫；证据契约
+  （insufficient 维不进总分 / 全维 insufficient→unavailable / 多余维度 reject）；
+  完整性（一致短路 pass / 空 fail / LLM 解析 / 非 bool reject / 违规 kind reject /
+  盲测 / 作者名 fail-closed）；三阶 gate（integrity 优先于风格 / 文学超限 roll_back /
+  容忍度可配置 / Style 与 Literary 分开报告 / no_action）；决策完整性边界
+  （基线有效+改写后文学 unavailable → roll_back，即便风格改善或 perfect；基线
+  unavailable → 走风格但 guard 标记 unavailable）。
+
+### Non-goals / 待办
+- 真实 deepseek-chat 验证（预计 11k–36k token）待用户批准；批准后产物写
+  `data/analysis/evaluation_v2/`，`data/analysis/evaluation/` 与
+  `data/analysis/generation/` 绝不覆盖、Phase 7 绝不重生成。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

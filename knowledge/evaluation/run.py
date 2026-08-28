@@ -91,15 +91,24 @@ def _style_fidelity(before_n: int | None, after_n: int | None) -> dict[str, Any]
 
 
 def _literary_quality(before: float | None, after: float | None,
-                      policy: EvaluationPolicy, *, evaluated: bool) -> dict[str, Any]:
+                      policy: EvaluationPolicy, *, guard: str) -> dict[str, Any]:
+    """文学质量护栏报告（绝不把 unavailable 的分数当 0）。
+
+    `guard` 三种状态：
+        - "applied"：before/after 均有分数，执行下降容忍度检查；
+        - "unavailable"：before 或 after 缺失，护栏无法评估（绝不伪造基线/结果）；
+        - "not_applicable"：no_action 或 integrity 失败（未进入文学护栏）。
+    """
     drop = round(before - after, 4) if (before is not None and after is not None) else None
+    evaluated = guard == "applied" and before is not None and after is not None
     return {
         "before": before,
         "after": after,
         "drop": drop,
         "max_literary_drop": policy.max_literary_drop,
         "drop_exceeded": bool(drop is not None and drop > policy.max_literary_drop),
-        "evaluated": bool(evaluated and before is not None and after is not None),
+        "evaluated": evaluated,
+        "guard": guard,
     }
 
 
@@ -153,7 +162,7 @@ def decide_feedback_outcome(
             iteration=iteration, max_iterations=max_iterations,
             before_n=before_n, after_n=None,
             lit=_literary_quality(literary_before, literary_after, policy,
-                                  evaluated=False),
+                                  guard="not_applicable"),
             content_integrity=None, author_id=author_id, passage_id=passage_id)
 
     # STEP 1：Content Integrity gate（最高优先级；破坏内容 → roll_back）
@@ -165,13 +174,30 @@ def decide_feedback_outcome(
             iteration=iteration, max_iterations=max_iterations,
             before_n=before_n, after_n=after_n,
             lit=_literary_quality(literary_before, literary_after, policy,
-                                  evaluated=False),
+                                  guard="not_applicable"),
             content_integrity=content_integrity, author_id=author_id,
             passage_id=passage_id)
 
     # STEP 2：Literary Quality guard（文学分明显下降超过容忍度 → roll_back）
-    lit = _literary_quality(literary_before, literary_after, policy, evaluated=True)
-    if lit["drop_exceeded"]:
+    guard = ("applied" if (literary_before is not None and literary_after is not None)
+             else "unavailable")
+
+    # fail-closed：基线有效但改写后文学评价 unavailable（如 6 维证据契约全失败）→
+    # 无法验证文学质量是否保留，绝不单凭 Style Fidelity 接受（spec 决策完整性）。
+    if literary_before is not None and literary_after is None and after is not None:
+        return _make_decision(
+            FEEDBACK_ROLL_BACK,
+            "post-revision literary evaluation unavailable; literary quality "
+            "preservation cannot be verified",
+            iteration=iteration, max_iterations=max_iterations,
+            before_n=before_n, after_n=after_n,
+            lit=_literary_quality(literary_before, literary_after, policy,
+                                  guard=guard),
+            content_integrity=content_integrity, author_id=author_id,
+            passage_id=passage_id)
+
+    lit = _literary_quality(literary_before, literary_after, policy, guard=guard)
+    if guard == "applied" and lit["drop_exceeded"]:
         return _make_decision(
             FEEDBACK_ROLL_BACK,
             f"literary quality dropped {lit['drop']} > tolerance "
