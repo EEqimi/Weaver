@@ -1280,9 +1280,9 @@ Accept / Continue / Roll Back；并加**独立**的 6 维 LLM 文学评价（1�
 
 ---
 
-## Checkpoint — Phase 8.1: Evaluation Decision Integrity & Revision Safety（零 token）
+## Checkpoint — Phase 8.1: Evaluation Decision Integrity & Revision Safety
 
-**Status:** COMPLETE — 真实 deepseek-chat 验证待批（未跑，`evaluation_v2` 未生成）
+**Status:** COMPLETE（真实 deepseek-chat 验证已跑）
 
 ### Goal
 修复 Phase 8 决策与改写的四类完整性缺陷（spec §一）：
@@ -1336,10 +1336,28 @@ Accept / Continue / Roll Back；并加**独立**的 6 维 LLM 文学评价（1�
   （基线有效+改写后文学 unavailable → roll_back，即便风格改善或 perfect；基线
   unavailable → 走风格但 guard 标记 unavailable）。
 
-### Non-goals / 待办
-- 真实 deepseek-chat 验证（预计 11k–36k token）待用户批准；批准后产物写
-  `data/analysis/evaluation_v2/`，`data/analysis/evaluation/` 与
-  `data/analysis/generation/` 绝不覆盖、Phase 7 绝不重生成。
+### 真实运行结果（deepseek-chat，读真实 DEEPSEEK_API_KEY，产物写 `evaluation_v2`）
+- **Austen**：文学评价 8.5 → 8.7（drop=-0.2，未触发文学护栏）；改写项 9（P2×2 + P3×7）；
+  改写 13 处局部编辑；内容完整性 LLM 语义检查 **passed**（4 项 preserved 全真、无事件
+  增删、0 违规，deterministic=False）；高优先级偏差 9 → 8 → **continue**；stylometric
+  余弦距离 0.16785717 → 0.16798929（几乎不动，无指纹漂移）。
+- **Dickens**：文学评价 8.5 → 8.5（drop=0.0）；改写项 9；改写器判定"已符合清单，无需改动"
+  → revised_text==original → 内容完整性**确定性短路** passed（deterministic=True，0 token）；
+  偏差 9 → 9 → **roll_back**（保留原文）；stylometric 0.14843544 不变。
+- **证据契约**：两位作者 12 个维度（6×2）全部 `assessment_status=observed`，每维
+  `verified_evidence_count ∈ [2,3]`；文学评价 schema=0.2.0（版本隔离生效）。
+- **token：8,594**（5,307 in / 3,287 out）；**cache 43 hit / 4 miss**（原文再测量、
+  改写、改写后重测全部命中 v1 缓存；仅 2×原文文学评价 + Austen 完整性 + Austen 改写后
+  文学评价 4 次 fresh）。对比 Phase 8 的 61,117 token——cache 复用 + 完整性前置省 token
+  显著。cache-replay 复跑确认 47/47 全命中、0 token（幂等）。
+- 产物：`data/analysis/evaluation_v2/`（{author}_{actual_profile, literary_evaluation,
+  revision_plan, revision_result, content_integrity, revised_actual_profile,
+  revised_literary_evaluation}.json + `evaluation_summary.json` + `evaluation_report.md`）。
+  `data/analysis/evaluation/`（Phase 8 v1）与 `data/analysis/generation/`（Phase 7）未动。
+
+### Non-goals / 后续
+- `max_iterations > 2` 多轮循环、段级 stylometric 漂移定位（spec §15.4）、§19.5
+  生成可控性实验——均属 Phase 9 及之后，非本增量。
 
 ---
 

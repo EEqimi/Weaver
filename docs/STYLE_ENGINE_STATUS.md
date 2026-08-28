@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 8.1 (Evaluation Decision Integrity & Revision Safety) — COMPLETE (zero token): 三阶决策 gate（Content Integrity > Literary Quality guard > Style Fidelity）+ no_action + 改写后内容完整性检查 + 文学评价证据契约；311 tests；真实 deepseek-chat 验证待批（`evaluation_v2` 未生成） |
-| **Last completed checkpoint** | Phase 8.1: `decide_feedback_outcome` 返回 `FeedbackDecision`（Style/Literary 分别报告，绝不合并加权分）；`ContentIntegrityChecker`（盲测 + 确定性短路）在改写后先于风格重测执行；文学评价每维 ≥1 逐字证据否则 insufficient（全维 insufficient → unavailable）；空改写计划 → no_action；fail-closed 文学边界（基线有效但改写后文学 unavailable → roll_back）；产物隔离 `evaluation_v2/`、缓存复用 v1；311 tests |
+| **Current phase** | Phase 8.1 (Evaluation Decision Integrity & Revision Safety) — COMPLETE: 三阶决策 gate（Content Integrity > Literary Quality guard > Style Fidelity）+ no_action + 改写后内容完整性检查 + 文学评价证据契约；真实 deepseek-chat 已跑（8,594 token，43 cache hit / 4 miss）；311 tests |
+| **Last completed checkpoint** | Phase 8.1 真实验证: Austen 文学 8.5→8.7 + 完整性 passed → **continue**（偏差 9→8）；Dickens 文学 8.5→8.5 + 完整性确定性短路 passed → **roll_back**（改写器判定无需改动）；12 维度证据契约全 observed（每维 2–3 条逐字证据）；产物 `data/analysis/evaluation_v2/`，v1 与 Phase 7 产物未动；311 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -286,7 +286,7 @@ Short current-state snapshot (≈1–2 min read). History lives in
   + evaluation_summary.json + evaluation_report.md）。绝不覆盖 `data/analysis/generation/`。
 - Tests：**287 passed**（was 267，+20 全确定性 Dummy-provider 零 token）。
 
-## Phase 8.1 (Evaluation Decision Integrity & Revision Safety) — COMPLETE (zero token)
+## Phase 8.1 (Evaluation Decision Integrity & Revision Safety) — COMPLETE
 - 决策三阶 gate（spec §四/§五）：STEP 1 Content Integrity（最高，破坏内容 → roll_back）
   → STEP 2 Literary Quality guard（`max_literary_drop` 可配置容忍度，默认 0.5）→ STEP 3
   Style Fidelity。**Style Fidelity 与 Literary Quality 分别报告**，绝不合并成单一加权分。
@@ -301,13 +301,14 @@ Short current-state snapshot (≈1–2 min read). History lives in
   "unavailable"` 显式标记。绝不把 unavailable 分数转成 0。
 - 版本隔离：`LITERARY_EVALUATOR_VERSION=0.1.0→0.2.0`（作废旧文学缓存）；
   `LITERARY_EVALUATION_SCHEMA_VERSION` / `CONTENT_INTEGRITY_VERSION` /
-  `FEEDBACK_DECISION_SCHEMA_VERSION` 新增；原文再测量缓存复用 v1（命中，0 token）。
+  `FEEDBACK_DECISION_SCHEMA_VERSION` 新增；原文再测量缓存复用 v1（命中）。
 - 产物隔离：Phase 8.1 写 `data/analysis/evaluation_v2/`；`data/analysis/evaluation/` 与
   `data/analysis/generation/` 绝不覆盖、Phase 7 绝不重生成。
+- 真实验证（deepseek-chat，8,594 token / 43 cache hit / 4 miss）：Austen 文学 8.5→8.7 +
+  完整性 LLM 语义 passed → 偏差 9→8 → **continue**；Dickens 文学 8.5→8.5 + 完整性确定性
+  短路 passed → 偏差 9→9 → **roll_back**；12 维度证据契约全 observed（每维 2–3 条逐字证据）。
 - Tests：**311 passed**（+24 全确定性 Dummy-provider 零 token）。
 
 ## Next planned action
-- 批准后跑真实 deepseek-chat Phase 8.1 验证（预计 11k–36k token），产物写
-  `data/analysis/evaluation_v2/`；之后更新文档并 commit+push 最终报告。
-- 再往后：**Phase 9**——多轮反馈（`max_iterations > 2`）、段级 stylometric 漂移定位
-  （spec §15.4）、§19.5 生成可控性实验（均独立增量，非本次反馈环内容）。
+- **Phase 9**：多轮反馈（`max_iterations > 2`）、段级 stylometric 漂移定位（spec §15.4），
+  以及 §19.5 生成可控性实验——均为后续独立增量，非本次反馈环内容。

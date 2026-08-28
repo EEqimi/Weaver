@@ -472,6 +472,8 @@ def _build_summary(provider: LLMProvider, policy: EvaluationPolicy,
         "blind": True,
         "authors": authors,
         "token_usage": dict(usage) if usage else None,
+        "cache_hits": getattr(provider, "cache_hits", None),
+        "cache_misses": getattr(provider, "cache_misses", None),
     }
 
 
