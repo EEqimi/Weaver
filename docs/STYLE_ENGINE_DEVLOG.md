@@ -791,6 +791,73 @@ strategy 集合，完成 Phase 4.5 的落地产物（复用 Phase 4.4 注册表�
 
 ---
 
+## Checkpoint — Phase 5: Author Profile Synthesis（作者风格画像合成）
+
+**Status:** COMPLETE — REVIEW PENDING（最后停止，等待人工 review；未进入 Phase 6）
+
+### Goal
+把 Phase 1–4.5 已有测量结果**确定性合成**为统一的 `AuthorStyleProfile`，供未来 Style
+Planner 使用。纯合成：不重新分析文本、不调用任何 LLM、不生成文章、不做风格混合、不修改
+既有 consolidation 产物、不把 held-out 作品混入画像。
+
+### Implementation
+- 新模块 `knowledge/profiles/style_profile.py`：
+  - `ProfileControlRole`（direct_control / conditional_control / diagnostic /
+    reference_only）——**派生自**既有 `FeatureRegistry.control_role`，经确定性映射
+    （core/candidate_core/descriptive→direct_control、diagnostic→diagnostic、
+    experimental→reference_only、未知→reference_only），不新建第二套冲突 role system。
+  - `GenerationControl` / `NarrativeControl` / `StrategyControl` / `AuthorStyleProfile`
+    dataclass；generation control 携带 feature_id/value/control_role/confidence/sample
+    support/variance/source/provenance。
+  - `AuthorStyleProfileSynthesizer.synthesize(...)`：纯函数，无 I/O、无随机、无时间戳。
+- 新 runner `knowledge/calibration/synthesize.py`：读回 4 份产物（全语料 author_profiles、
+  sampled author_profiles、`{author}_canonical_strategies.json`、stylometry baseline+index），
+  合成并落盘 `data/analysis/style_profiles/`。
+
+### 关键设计决策
+- **stylometric 指纹绝不进入 generation controls**：char 3-gram / function-word / PCA /
+  Delta 统一归入 `diagnostics.stylometry`（control_role=diagnostic），只做生成后相似度诊断。
+- **不确定性一等**：n_expected/n_valid/n_missing/n_unobservable/n_insufficient 全保留；
+  not_observable / insufficient_evidence / missing **绝不伪造为 0**（mean 保持 null）。
+- **sampled LLM 结果带 scope**：`source_scope` 区分 `full_train_corpus`（22 统计特征）与
+  `calibration_sample`（8 LLM 特征 + 10 叙事维度），不表述为全语料确定真值。
+- **canonical strategies → conditional_control + 确定性 control_priority**：排序键
+  （降序）= support_status tier（validated>candidate>discovered）→ 跨作品数 → 跨 chunk 数 →
+  confidence → raw observations → canonical id（稳定兜底）。绝不简单 1/0.5/0.1，绝不调用 LLM。
+- **provenance**：canonical → raw strategies → chunks → works → evidence 链保留；明确
+  global strategy_registry.status 为跨作者单调生命周期，不作为作者级结论。
+- **确定性复现**：无随机/时间戳；每份画像带 `reproducibility_hash`（sha256，覆盖除 hash
+  外的全部内容）。同输入重复合成 → 结构与 hash 完全一致。
+- **held-out 隔离**：`author_scope.held_out_isolation` 显式校验 profile work_ids 与
+  strategy supporting_work_ids 均 ⊆ train；Persuasion / A Tale of Two Cities 绝不进入画像。
+
+### 版本
+- `knowledge/schema/versions.py` 新增 `AUTHOR_STYLE_PROFILE_SCHEMA_VERSION = "0.1.0"`（独立
+  版本，不影响既有 aggregation/consolidation 缓存与产物）。
+
+### 产物（确定性合成结果）
+- `data/analysis/style_profiles/{austen,dickens}_style_profile.json` +
+  `style_profile_summary.json` + `style_profile_report.md`。
+- Austen：generation 30（22 direct + 8 reference）、narrative 10、strategy 26（validated 7 /
+  candidate 2 / discovered 17）、diagnostic 3 族、heldout_clean=True。
+- Dickens：generation 30（22 direct + 8 reference）、narrative 10、strategy 36（validated 12 /
+  candidate 5 / discovered 19）、diagnostic 3 族、heldout_clean=True。
+- canonical 数量与 support_status 与 Phase 4.5 产物**完全一致**（26 / 36，未丢失任何策略）。
+
+### Tests
+- **182 passed**（was 167）：新增 15 个 Phase 5 测试（control-role 映射、diagnostic 不进
+  generation、direct/conditional/reference-only 分桶、canonical 数量保持、support_status
+  保持、不确定性不伪造 0、narrative not_observable 保留、full-corpus vs sampled scope、
+  held-out 隔离（clean + 双通道污染检出）、strategy 优先级确定性 + 跨轮稳定、字节级复现）。
+
+### Non-goals（本次明确不做）
+- 未调用 DeepSeek / Qwen / 任何 LLM；未重跑 40-chunk calibration；未运行 full-corpus LLM；
+  未做 Style Mixing / Planner / Prompt Compiler / 生成 / Revision Loop；未修改 Austen/Dickens
+  canonical consolidation 结果；未清洗旧 global registry；未 candidate_core promotion；
+  未安装 NLTK；未建 mixed-effects model。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

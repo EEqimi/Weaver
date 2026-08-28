@@ -24,3 +24,7 @@ STRATEGY_CONSOLIDATOR_VERSION = "0.1.0"
 STYLOMETRY_VERSION = "0.1.0"
 AGGREGATION_VERSION = "0.2.0"
 SAMPLING_VERSION = "0.1.0"
+# Phase 5：作者风格画像（AuthorStyleProfile）schema 版本。这是对既有 AuthorProfile +
+# canonical strategy set + stylometry 的**确定性合成**（不重新分析、不调用 LLM），
+# 因此独立版本，避免影响既有 aggregation/consolidation 缓存与产物。
+AUTHOR_STYLE_PROFILE_SCHEMA_VERSION = "0.1.0"

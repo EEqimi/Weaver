@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 4.5 (repair hardening) — COMPLETE: coverage-repair now keyed by stable `canonical_strategy_id` (not name); no data change, no LLM re-run |
-| **Last completed checkpoint** | Repair identity hardening: `repair()`/merge reference `canonical_strategy_id`; Austen/Dickens artifacts untouched; 167 tests |
+| **Current phase** | Phase 5 (author-profile synthesis) — COMPLETE (REVIEW PENDING): deterministic `AuthorStyleProfile` built from Phase 1–4.5 artifacts; no LLM, no re-analysis; stopped for human review, Phase 6 not started |
+| **Last completed checkpoint** | Author style-profile synthesis: `AuthorStyleProfileSynthesizer` + `calibration/synthesize.py`; Austen 26 / Dickens 36 canonical strategies preserved; 182 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -35,9 +35,23 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 ## What is not implemented yet
 - Full-corpus LLM feature extraction (only the 40-chunk calibration sample has LLM features).
-- Phase 5 (author-profile synthesis) and beyond (style mixing, planner, generation loop).
+- Phase 6 and beyond (style mixing, planner, prompt compiler, generation loop, revision loop).
 - NlpAnalyzer (POS) features — NLTK intentionally not installed.
 - Mixed-effects / variance-decomposition model (deferred by spec).
+
+## Phase 5 (author-profile synthesis) — COMPLETE (REVIEW PENDING)
+- `knowledge/profiles/style_profile.py`（schema + 确定性合成器）+
+  `knowledge/calibration/synthesize.py`（runner）。
+- `AuthorStyleProfile`：generation_controls / narrative_controls / strategy_controls /
+  diagnostics.stylometry / uncertainty / provenance / reproducibility_hash。
+- control_role 复用既有 registry 角色：core/candidate_core/descriptive→direct_control、
+  diagnostic→diagnostic、experimental→reference_only；stylometric 指纹绝不进 generation。
+- canonical strategies → conditional_control + 确定性 control_priority（support_status →
+  跨作品 → 跨 chunk → confidence → raw → id）。
+- 不确定性一等（missing/insufficient/not_observable 绝不伪造 0）；sampled LLM 结果带
+  `source_scope`；held-out 隔离显式校验；`reproducibility_hash` 保证字节级可复现。
+- 产物：`data/analysis/style_profiles/`（Austen 26 / Dickens 36 canonical 数量与 support_status
+  与 Phase 4.5 完全一致）。**停止等待人工 review，未进入 Phase 6。**
 
 ## Current corpus
 - **TRAIN:** Pride and Prejudice, Emma (Austen); Great Expectations, David Copperfield (Dickens).
@@ -45,6 +59,10 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
+- **182 tests passed** (was 167). +15 Phase 5 tests: control-role 映射、diagnostic 不进
+  generation、direct/conditional/reference-only 分桶、canonical 数量保持、support_status
+  保持、不确定性不伪造 0、narrative not_observable 保留、full-corpus vs sampled scope、
+  held-out 隔离（clean + 双通道污染检出）、strategy 优先级确定性 + 跨轮稳定、字节级复现。
 - **167 tests passed** (was 161). +13 Phase 4.5 tests: author-scope isolation,
   missing-author rejection, complete source coverage, duplicate-assignment /
   hallucinated / missing source-id rejection, canonical provenance
@@ -135,5 +153,5 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - `candidate_core` 特征仍不得晋升（校准仅标定样本，不足以晋升）。
 
 ## Next planned action
-- Phase 5 (author-profile synthesis) — build canonical author strategy sets into the
-  author profile, then style mixing / planner / generation loop.
+- **Human review of Phase 5 artifacts**（`data/analysis/style_profiles/`）——然后才进入
+  Phase 6（style mixing / planner / generation loop）。
