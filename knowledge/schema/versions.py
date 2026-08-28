@@ -44,3 +44,10 @@ BAND_SCHEMA_VERSION = "0.1.0"
 # 既有画像/计划/阈值缓存；生成响应（GeneratedPassage）与 analysis 测量严格分离。
 GENERATION_SCHEMA_VERSION = "0.1.0"
 GENERATION_VERSION = "0.1.0"
+
+# Phase 8：style feedback loop + 文学评价（对生成正文再测量 → 目标 vs 实际 → 改写）。
+# 独立版本，避免影响既有 analysis/generation/planning 的缓存与产物。LLM 文学评价器与
+# 改写器的版本进一步与 evaluation schema 分离（同 spec §17.6 的版本分离原则）。
+EVALUATION_SCHEMA_VERSION = "0.1.0"
+LITERARY_EVALUATOR_VERSION = "0.1.0"
+REVISION_REWRITER_VERSION = "0.1.0"

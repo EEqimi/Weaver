@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 7.1 (provenance/integrity hardening) — COMPLETE (zero token): condition_id vs generation_id split, plumbing gate (fail-closed), markdown fix, leakage guard A/B separation (data-driven); existing Austen/Dickens passages unchanged; Phase 8 (evaluation loop) not started |
-| **Last completed checkpoint** | Phase 7.1: `generation_condition_id`/`generation_id` identity model + `request_id`, `_require_valid_plumbing` gate, `_render_passage_md` f-string fix, `assert_no_imitation_instruction`/`assert_no_author_identity` (metadata-supplied names), backward-compatible `from_dict`; 267 tests |
+| **Current phase** | Phase 8 (Style Feedback Loop + 独立 LLM 文学评价) — COMPLETE: 对 Phase 7 Austen/Dickens 正文再测量 → 目标 vs 实际 → P0–P4 改写计划 → 最小编辑改写 → 再分析 → stylometric 诊断 → Accept/Continue/Roll Back；独立 6 维文学评价；真实 deepseek-chat 已跑（61,117 token）；287 tests |
+| **Last completed checkpoint** | Phase 8: `knowledge/evaluation/`（schema/literary/analyze/compare/revision/run）+ `EVALUATION_SCHEMA_VERSION` 等三版本；Austen → continue（9→8 偏差），Dickens → roll_back（改写器判定无需改动）；blind 评价/改写、P0 保护、stylometric 仅诊断、改写指令可解释（无作者名/数值/微观指纹）；287 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -35,7 +35,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 ## What is not implemented yet
 - Full-corpus LLM feature extraction (only the 40-chunk calibration sample has LLM features).
-- Phase 8 and beyond (evaluation loop, revision loop).
+- Phase 9 and beyond (multi-round revision loop `max_iterations > 2`; segment-level
+  stylometric drift localization spec §15.4; §19.5 generation-controllability experiment).
 - Multi-author style mixing (the `conflicts` / `resolution_required` structure is reserved in
   `StylePlan.planner_metadata`, currently empty for single-author planning).
 - NlpAnalyzer (POS) features — NLTK intentionally not installed.
@@ -267,7 +268,24 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - `candidate_core` 特征仍不得晋升（校准仅标定样本，不足以晋升）——Phase 6 已把这一条
   落实为确定性门槛 gate 并写入 warning：strong 激活的 candidate_core 仍是 CANDIDATE。
 
+## Phase 8 (Style Feedback Loop + 独立 LLM 文学评价) — COMPLETE
+- `knowledge/evaluation/`：schema / literary / analyze / compare / revision / run；
+  `knowledge/schema/versions.py` 新增 `EVALUATION_SCHEMA_VERSION` /
+  `LITERARY_EVALUATOR_VERSION` / `REVISION_REWRITER_VERSION`（独立，不 bump 既有版本）。
+- 闭环：再测量（Actual Style Profile，Layer A 统计 22 + 判断 8 LLM + B 叙事 + C 策略
+  + D stylometric 重拟合诊断）→ 目标 vs 实际（band 偏差 / 叙事 / 策略覆盖）→ 优先化
+  改写计划（P0–P4）→ 最小编辑改写 → 再分析 → 确定性 Accept / Continue / Roll Back。
+- 独立 LLM 文学评价：6 维 1–10 + strength/weakness + 逐字校验证据引文，加权总分。
+- 铁律落实为测试断言：盲测（评价/改写 prompt 无作者名/模仿令牌，A/B 守卫 fail-closed）、
+  P0 保护强制入改写 prompt、改写指令只含可解释自然语言（无作者名/原始数值/微观指纹）、
+  stylometric 距离仅诊断绝不进指令或决策、compare/优先级/决策均为纯函数。
+- 真实运行（deepseek-chat，61,117 token）：Austen 评价 8.5→8.5、9 改写项、偏差 9→8
+  → **continue**；Dickens 评价 8.5→8.5、改写器判定无需改动 → 偏差 9→9 → **roll_back**。
+- 产物：`data/analysis/evaluation/`（actual_profile / literary_evaluation /
+  revision_plan / revision_result / revised_actual_profile / revised_literary_evaluation
+  + evaluation_summary.json + evaluation_report.md）。绝不覆盖 `data/analysis/generation/`。
+- Tests：**287 passed**（was 267，+20 全确定性 Dummy-provider 零 token）。
+
 ## Next planned action
-- **Phase 8（evaluation loop）**：对 Phase 7 生成的 Austen/Dickens 正文做文学评价
-  （此前仍需人工 review Phase 7 artifacts，`data/analysis/generation/`）。Phase 7.1
-  provenance/integrity hardening 已完成并作为进入 Phase 8 的前置。
+- **Phase 9**：多轮反馈（`max_iterations > 2`）、段级 stylometric 漂移定位（spec §15.4），
+  以及 §19.5 生成可控性实验——均为后续独立增量，非本次反馈环内容。

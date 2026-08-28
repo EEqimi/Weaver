@@ -1207,6 +1207,79 @@ DeepSeek、不生成/不评价/不改写任何正文**；既有 Austen/Dickens �
 
 ---
 
+## Checkpoint — Phase 8: Style Feedback Loop + 独立 LLM 文学评价（真实 deepseek-chat）
+
+**Status:** COMPLETE
+
+### Goal
+闭合 spec §15 反馈环：对 Phase 7 生成的 Austen/Dickens 正文再测量为 Actual Style
+Profile（Layer A 统计+判断 / B 叙事 / C 策略 / D stylometric）→ 目标 vs 实际偏差 →
+优先化改写计划（P0–P4）→ 最小编辑改写 → 再分析 → stylometric 诊断 → 确定性
+Accept / Continue / Roll Back；并加**独立**的 6 维 LLM 文学评价（1–10 + 证据引文）。
+
+### New files
+- `knowledge/evaluation/schema.py` — 纯数据 schema（to_dict/from_dict + schema-version
+  守卫，镜像 planning/schema.py）：`ActualStyleProfile` / `FeatureDeviation` /
+  `NarrativeDeviation` / `StrategyCoverage` / `ComparisonResult` / `DimensionScore` /
+  `LiteraryEvaluation` / `RevisionItem` / `RevisionPlan` / `RevisionResult` / `EvalError`；
+  常量 `LITERARY_DIMENSIONS`（6 维）、`DEFAULT_DIMENSION_WEIGHTS`、`REVISION_PRIORITIES`、
+  `CATEGORY_TO_PRIORITY`。
+- `knowledge/evaluation/literary.py` — `LiteraryEvaluator`（LLM，盲测）：6 维各
+  score 1–10 + summary + strength + weakness + evidence（逐字校验，未验证引文显式
+  丢弃）；加权总分；盲测 system prompt。
+- `knowledge/evaluation/analyze.py` — `measure_actual_profile`：复用既有 analyzer
+  （`StatisticalAnalyzer` 22 维 + `LLMFeatureAnalyzer` 8 维 + `NarrativeAnalyzer` +
+  `StrategyMiner`），Layer D 在 TRAIN chunk 上**重拟合** `StylometricVectorizer` 并与
+  持久化 `index.json` 的 `feature_names` 严格比对（fail-closed），对作者质心算余弦距离。
+- `knowledge/evaluation/compare.py` — `compare_target_actual`（纯函数）：语言 band
+  偏差（low/medium/high → on/above/below/not_measurable）、叙事字段偏差、策略覆盖。
+- `knowledge/evaluation/revision.py` — `build_revision_plan`（纯函数，P0>P1>P2>P3 有序，
+  P4 恒无改写项）+ `RevisionRewriter`（LLM 最小编辑改写，盲测，P0 保护强制入 prompt，
+  A/B 泄露守卫 fail-closed）。
+- `knowledge/evaluation/run.py` — `run_evaluation` 编排 + report/summary 渲染 +
+  `decide_feedback_outcome`（纯函数，确定性 Accept/Continue/Roll Back）。
+- `knowledge/schema/versions.py` — 新增 `EVALUATION_SCHEMA_VERSION` /
+  `LITERARY_EVALUATOR_VERSION` / `REVISION_REWRITER_VERSION`（独立版本，绝不 bump 既有
+  cache 影响版本）。
+
+### 设计铁律（测试强制断言）
+- 盲测：评价与改写 prompt 绝不含作者名或 "write like"/"imitate"/"in the style of"
+  （复用 `generation/schema.py` A/B 守卫，fail-closed）。
+- P0 绝不因低优先级风格编辑被破坏：改写指令显式禁止改动情节/事实/人物/前提。
+- 改写指令只含可解释自然语言（字面 guidance / trigger→operation→effect），绝不含
+  作者名、原始数值、微观 stylometric 指纹（"char 3-gram" 等）。
+- stylometric 余弦距离只诊断，绝不进改写指令、绝不进决策。
+- 确定性：compare / 优先级排序 / accept/roll_back 均为纯函数；LLM 步骤隔离在注入
+  provider 后（测试用 `DummyLLMProvider`，零 token）。
+
+### 真实运行结果（deepseek-chat，读真实 DEEPSEEK_API_KEY，读 Phase 7 产物，绝不覆盖）
+- **Austen**：文学评价 8.5 → 8.5；改写项 9（P2×2 + P3×7）；改写做了 13 处局部编辑
+  （内部声音 / 身体动作 / 延迟揭示 / 破折号 / 对话 / 分号等）；高优先级偏差 9 → 8 →
+  **continue**；stylometric 余弦距离 0.16785717 → 0.16798929（几乎不动，说明改写
+  未造成指纹漂移）。
+- **Dickens**：文学评价 8.5 → 8.5；改写项 9（P2×2 + P3×7）；改写器判定"已符合清单，
+  无需改动"（合法 LLM 行为）→ 偏差 9 → 9 → **roll_back**（保留原文）。
+- token：61,117（46,563 in / 14,554 out）。blind=True；6 维文学评价每维含 score +
+  strength + weakness；evidence 经逐字校验（Austen plot_logic 的模型引文非逐字，
+  被 fail-closed 丢弃 → evidence=0，属预期而非错误）。
+- 产物：`data/analysis/evaluation/`（{author}_{actual_profile, literary_evaluation,
+  revision_plan, revision_result, revised_actual_profile, revised_literary_evaluation}
+  .json + `evaluation_summary.json` + `evaluation_report.md`）。
+
+### Tests
+- **287 passed**（was 267）：+20 Phase 8 测试（全确定性，Dummy provider，零 token）——
+  schema 往返 + 版本守卫；compare band 分类；改写优先级 P0>P1>P2>P3 且指令无作者名/
+  无数值/无微观指纹；rewriter P0 保护 + 盲测 + 空计划短路 + 作者名泄露 fail-closed；
+  `decide_feedback_outcome` 规则；`measure_actual_profile` 的 Layer A 统计（22）+ Layer D
+  重拟合诊断（合成 fixture）在未配置 provider 下 LLM 层显式 unavailable、绝不伪造。
+
+### Non-goals（本次明确不做）
+- `max_iterations > 2` 的多轮循环；真正段级 stylometric 漂移定位（spec §15.4）——
+  首版用整段最小编辑 + 变更说明局部性映射。
+- §19.5 生成可控性实验（low/medium/high 再生成）——后续独立实验，非反馈环内容。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git
