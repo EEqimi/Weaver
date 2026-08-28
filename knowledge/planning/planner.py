@@ -11,22 +11,32 @@ from typing import Any
 
 from ..profiles.style_profile import AuthorStyleProfile
 from ..schema.versions import STYLE_PLAN_SCHEMA_VERSION, STYLE_PLANNER_VERSION
+from .bands import describe_feature
 from .policy import (
-    apply_narrative_budget, assign_language_buckets, describe_feature,
+    apply_narrative_budget, assign_language_buckets,
     describe_narrative, language_activation, narrative_activation,
     select_strategies, _support_snapshot,
 )
 from .schema import (
-    PlannedControl, PlannedNarrativeControl, PlannedStrategy, PlannerPolicy,
-    PlanningError, StylePlan, WritingRequest, make_style_plan_id,
+    ActivationLevel, PlannedControl, PlannedNarrativeControl, PlannedStrategy,
+    PlannerPolicy, PlanningError, StylePlan, WritingRequest, make_style_plan_id,
 )
+
+# 一旦缺少经验 band 阈值，这些"本可激活"的级别要降级为 reference（绝不编造标签）。
+_NOT_COMPILABLE_DOWNGRADE = {
+    ActivationLevel.STRONG.value, ActivationLevel.MEDIUM.value, ActivationLevel.WEAK.value,
+}
 
 
 class StylePlanner:
     """把画像（观察）翻译成计划（本次激活哪些控制）。"""
 
-    def __init__(self, policy: PlannerPolicy | None = None) -> None:
+    def __init__(self, policy: PlannerPolicy | None = None,
+                 band_thresholds: dict[str, Any] | None = None) -> None:
         self.policy = policy or PlannerPolicy()
+        # TRAIN-only 经验 band 阈值（bands.compute_band_thresholds 产物）。None 时所有
+        # 数值特征不可编译 → 降级为 reference（fail-safe，绝不自造阈值）。
+        self.band_thresholds = band_thresholds
 
     # ------------------------------------------------------------------ #
     # 入口
@@ -57,7 +67,8 @@ class StylePlanner:
             warnings=warnings,
             planner_metadata=self._build_metadata(
                 profile, language, reference, suppressed,
-                active_strategies, reference_strategies, self.policy),
+                active_strategies, reference_strategies, self.policy,
+                self.band_thresholds),
         )
 
     # ------------------------------------------------------------------ #
@@ -84,6 +95,12 @@ class StylePlanner:
             activation, reason = language_activation(
                 feature_id, gc.registry_control_role, gc.source_scope,
                 summary, self.policy)
+            guidance = describe_feature(feature_id, summary, self.band_thresholds)
+            # Phase 6.1：缺乏经验 band 阈值的特征绝不编造标签 → 降级 reference。
+            if guidance is None and activation in _NOT_COMPILABLE_DOWNGRADE:
+                activation = ActivationLevel.REFERENCE.value
+                reason = ("not_compilable: no empirical band threshold "
+                          "(feature absent from TRAIN band artifact)")
             raw.append({
                 "feature_id": feature_id,
                 "registry_control_role": gc.registry_control_role,
@@ -92,7 +109,7 @@ class StylePlanner:
                 "source_scope": gc.source_scope,
                 "support": _support_snapshot(summary),
                 "reason": reason,
-                "guidance": describe_feature(feature_id, summary),
+                "guidance": guidance or "",
                 "source": gc.source_artifact,
             })
         activated, reference, suppressed = assign_language_buckets(raw, self.policy)
@@ -202,7 +219,10 @@ class StylePlanner:
                         suppressed: list[PlannedControl],
                         active_strategies: list[PlannedStrategy],
                         reference_strategies: list[PlannedStrategy],
-                        policy: PlannerPolicy) -> dict[str, Any]:
+                        policy: PlannerPolicy,
+                        band_thresholds: dict[str, Any] | None) -> dict[str, Any]:
+        bt = band_thresholds or {}
+        bt_features = bt.get("features", {})
         return {
             "planner_version": STYLE_PLANNER_VERSION,
             "policy": policy.to_dict(),
@@ -215,6 +235,14 @@ class StylePlanner:
             "suppressed_language_controls": len(suppressed),
             "active_strategies": len(active_strategies),
             "reference_strategies": len(reference_strategies),
+            # Phase 6.1：经验 band 阈值的溯源摘要（不展开整个 artifact）。
+            "band_thresholds": {
+                "schema_version": bt.get("schema_version"),
+                "train_only": bt.get("train_only"),
+                "n_train_chunks": bt.get("n_train_chunks"),
+                "n_features_with_threshold": len(bt_features),
+                "derived_from": bt.get("derived_from"),
+            },
             # 单作者规划通常无冲突；结构预留给未来的多作者风格混合。
             "conflicts": [],
             "resolution_required": False,

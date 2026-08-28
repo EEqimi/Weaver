@@ -996,6 +996,96 @@ artifact（引用 `stylometric_author_targets.json`）+ artifact_keys（centroid
 
 ---
 
+## Checkpoint — Phase 6.1: Evidence-Grounded Guidance & Prompt Budget Integrity
+
+**Status:** COMPLETE — REVIEW PENDING（停在 review 检查点，未进入 Phase 7）
+
+### Goal
+在 Phase 6 已通过架构 review 之后、任何真实生成调用之前，做一次聚焦修正：把语言控制
+guidance 从"人工绝对阈值 + 超出测量的文学解释"改为"TRAIN-only 经验 band + 字面指令"；
+把提示词预算从"硬截断"改为"确定性降级（绝不截断用户内容）"；并补齐 section 一致性
+与缺失值文档。**未调用任何 LLM，未生成任何正文，未修改 AuthorStyleProfile 测量。**
+
+### 变更 1：移除人工阈值 → TRAIN-only 经验 band（spec §1）
+- 删除 `policy.py` 里的 `_FEATURE_BANDS`（dialogue_ratio 0.2/0.4、mean_sentence_length
+  15/22、comma_density 60/90 等手选绝对阈值）与 `describe_feature`。
+- 新增 `knowledge/planning/bands.py`：
+  - `compute_band_thresholds(chunks, train_work_ids)`：TRAIN chunk-level 分布 →
+    确定性分位数 → band 阈值（`low < Q33`、`medium ∈ [Q33, Q67]`、`high > Q67`）。
+    分位数用线性插值（等价 numpy `linear`），值 round 到 8 位保证持久化稳定。
+  - **TRAIN-only 保证**：`train_work_ids` 白名单在签名层显式排除非 TRAIN chunk；
+    held-out 绝不参与；`run.py` 用两位作者画像的 `author_scope.train_work_ids` 并集
+    作为白名单，fail-closed。
+  - 阈值持久化 + 版本化：`data/analysis/planning/band_thresholds.json`
+    （`schema_version=BAND_SCHEMA_VERSION=0.1.0`，独立版本不影响既有缓存）。
+  - `band_label` / `describe_feature`：无阈值或未知 feature → 返回 `None`
+    （`not_compilable`），绝不编造标签。
+- **跨作者合并阈值**（关键决策）：不是 per-author，而是 4 部 TRAIN 作品的 2,328 个 chunk
+  **合并**求 Q33/Q67。原因：per-author 分位数会让 Austen/Dickens 各自都读成 "medium"，
+  抹掉对比的目的；合并阈值才能保留两位作者"同一 band 系统下方向相反"的区分。
+
+### 变更 2：guidance 只字面描述测得什么（spec §2）
+- 新增 `_LITERAL_GUIDANCE`（22 个统计特征 × {low/medium/high} 字面指令）：
+  `comma_density high → "Use commas relatively frequently."`、
+  `semicolon_density high → "Use semicolons relatively frequently."`、
+  `mean_sentence_length high → "Favor relatively long sentences."`、
+  `dialogue_ratio high → "Use dialogue relatively often."` 等。
+- **移除全部未测量的文学机制**：不再有 "many subordinate clauses and parenthetical
+  insertions"、"paired and antithetical constructions"；不再硬编码 Austen/Dickens
+  专属文学知识。
+- `describe_feature` 返回 `None` 时，`planner.py` 把本可激活（strong/medium/weak）的
+  控制**降级为 reference**，reason=`not_compilable: no empirical band threshold`。
+
+### 变更 3：预算绝不截断用户内容（spec §3）
+- 删除 `compiler.py` 里的 `text = text[:max_prompt_chars]` 硬截断。
+- 确定性降级顺序（每步都记录进 `removed_controls`，绝不静默）：
+  1. 丢弃最低优先级条件策略（从末尾起）；
+  2. 丢弃 secondary 语言控制（从末尾起）；
+  3. 丢弃最弱语言控制（weak → medium → strong，同层取末位）；
+  4. 移除可选解释措辞（ROLE / IMPORTANT 的精简变体）；
+  5. 强制内容仍放不下 → 抛 `PromptBudgetError`（绝不切 CONTENT）。
+- `CompiledPrompt` 字段改为 `degraded` / `removed_controls` / `degradation_note`
+  （取代误导性的 `truncated` / `truncation_note`）。
+
+### 变更 4：section 一致性（spec §4）
+- `compile` 现在把 6 段全存入 `sections`，`text` 直接由 `_assemble(sections)` 派生，
+  因此 `_assemble(prompt.sections) == prompt.text` 恒成立（有回归测试）。
+
+### 变更 5：POV 移到 CONTENT-only + 缺失值文档（spec §5）
+- 移除 NARRATIVE 段里重复的 POV 覆盖行（"explicit user requirement"）；POV 只出现在
+  CONTENT。缺失值语义在 `bands.py` 与 `planner.py` docstring 明确：全缺 / `n_valid=0`
+  → suppressed；部分缺失经 `completeness` 贡献（不自动 suppress）。
+
+### 产物（确定性，同一 brief、不同画像，无 LLM）
+- `data/analysis/planning/band_thresholds.json`：22 特征 × {q33, q67, n, min, median,
+  max}，train_only=True，2,328 TRAIN chunks，4 部 TRAIN 作品，held-out 排除。
+- Austen 语言控制 guidance（经验 band）：dialogue_ratio "Use dialogue relatively
+  often."（high）、lexical_diversity "Vary vocabulary relatively widely."（high）、
+  mean_paragraph_length "Favor relatively long paragraphs."（high）、comma_density
+  "Use commas relatively rarely."（low）、semicolon_density "Use semicolons
+  relatively frequently."（high）。
+- Dickens 语言控制 guidance：dialogue_ratio "Use dialogue in moderate proportion."、
+  lexical_diversity "Use moderate lexical variety."、mean_paragraph_length "Use a
+  moderate paragraph length."、comma_density "Use commas moderately."、
+  semicolon_density "Use semicolons moderately."
+- 与 Phase 6 对比：原来 Austen dialogue "prominent"/Dickens "sparse"（文学解释）→ 现为
+  字面 "relatively often"/"in moderate proportion"；原来 "dense commas, many
+  subordinate clauses…" → 现为 "Use commas moderately/frequently."
+- 提示词：Austen 4826 chars、Dickens 5055 chars，均未降级（degraded=False）。
+
+### Tests
+- **236 passed**（was 223）：新增 13 个 Phase 6.1 测试 —— TRAIN-only band（held-out
+  排除 + 不改变阈值）、确定性、跨作者合并（一份阈值非 per-author）、band_label 三档
+  边界、字面 guidance 无未测机制（comma/semicolon/long-sentence）、无 band → None、
+  not_compilable→reference、长内容永不硬截断（多档预算循环）、低优先级先于强制内容
+  移除、强制溢出抛 `PromptBudgetError`、sections 精确重构 text、真实 band_thresholds
+  TRAIN-only 校验。
+
+### Non-goals（本次明确不做）
+- **未调用任何 LLM；未生成任何正文；未修改 AuthorStyleProfile 测量；未启动 Phase 7。**
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

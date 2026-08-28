@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 6 (Style Planner & Prompt Compiler) — COMPLETE (REVIEW PENDING): three-layer separation profile → StylePlan → prompt; deterministic activation policy + control budget + natural-language banding; no LLM, no generated prose; Phase 7 (generation loop) not started |
-| **Last completed checkpoint** | StylePlanner + PromptCompiler: `WritingRequest`/`StylePlan` schema, `PlannerPolicy`, candidate_core gate, control budget (never silent-drop), POV override, strategy selection, Austen/Dickens comparison artifacts; 223 tests |
+| **Current phase** | Phase 6.1 (Evidence-Grounded Guidance & Prompt Budget Integrity) — COMPLETE (REVIEW PENDING): TRAIN-only empirical band thresholds (Q33/Q67) replace arbitrary manual thresholds; literal non-overclaiming guidance; prompt budget degrades deterministically and never truncates user content; no LLM, no generated prose; Phase 7 (generation loop) not started |
+| **Last completed checkpoint** | Phase 6.1: `bands.py` (TRAIN-only empirical banding), `policy.py` de-hardcoded, `planner.py` not_compilable→reference, `compiler.py` budget degradation + `PromptBudgetError` + section consistency + POV CONTENT-only, `band_thresholds.json`; 236 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -86,12 +86,35 @@ Short current-state snapshot (≈1–2 min read). History lives in
   + 汇总）。同一中性 brief：Austen dialogue "prominent" + third-person + low narrator
   presence vs Dickens dialogue "sparse" + first-person + medium narrator presence。
 
+## Phase 6.1 (evidence-grounded guidance + prompt budget integrity) — COMPLETE (REVIEW PENDING)
+- `knowledge/planning/bands.py`：TRAIN-only 经验 band 阈值（`low < Q33`、`medium ∈
+  [Q33, Q67]`、`high > Q67`，线性插值分位数）；`compute_band_thresholds` 纯函数 +
+  `band_label` + `describe_feature`（无阈值/未知特征 → `None`，绝不编造）+ 22 特征
+  字面 guidance（无未测文学机制）。阈值持久化为 `band_thresholds.json`（独立 schema
+  版本）。跨作者**合并** TRAIN 分位数（非 per-author）以保留 Austen/Dickens 区分。
+- `policy.py`：删除 `_FEATURE_BANDS` 人工阈值与 `describe_feature`；激活/预算/叙事逻辑不变。
+- `planner.py`：`StylePlanner(policy, band_thresholds)`；guidance `None` 且本可激活
+  （strong/medium/weak）→ 降级 reference（reason=`not_compilable`）。
+- `compiler.py`：预算**确定性降级**（策略→secondary→weak→措辞→`PromptBudgetError`），
+  **绝不硬截断用户内容**；`removed_controls` 记录每次移除；`sections` 6 段全保留且
+  `_assemble(sections) == text`；POV 移至 CONTENT-only（NARRATIVE 不再重复）。
+- 缺失值语义明确：全缺 / `n_valid=0` → suppressed；部分缺失经 `completeness` 贡献
+  （不自动 suppress）。
+- 产物：`band_thresholds.json`（22 特征、2,328 TRAIN chunks、held-out 排除）；Austen
+  dialogue_ratio → "Use dialogue relatively often."、Dickens → "Use dialogue in
+  moderate proportion."（字面，无 "prominent/sparse" 文学解释）。
+
 ## Current corpus
 - **TRAIN:** Pride and Prejudice, Emma (Austen); Great Expectations, David Copperfield (Dickens).
 - **HELD-OUT:** Persuasion (Austen); A Tale of Two Cities (Dickens).
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
+- **236 tests passed** (was 223). +13 Phase 6.1 tests: TRAIN-only band（held-out 排除 /
+  不改变阈值）、band 确定性、跨作者合并阈值、band_label 三档边界、字面 guidance 无未测
+  机制、无 band → None、not_compilable→reference、长内容永不硬截断（多档预算）、低优先级
+  先于强制内容移除、强制溢出抛 `PromptBudgetError`、sections 精确重构 text、真实
+  band_thresholds TRAIN-only 校验。
 - **223 tests passed** (was 191). +32 Phase 6 tests: schema 往返（WritingRequest/Policy/
   PlannedControl/PlannedStrategy/StylePlan）、空 content 拒绝、激活政策 7 例（candidate_core
   strong / insufficient / sampled / descriptive / experimental / diagnostic）、语言/叙事/策略
@@ -197,6 +220,6 @@ Short current-state snapshot (≈1–2 min read). History lives in
   落实为确定性门槛 gate 并写入 warning：strong 激活的 candidate_core 仍是 CANDIDATE。
 
 ## Next planned action
-- **Human review of Phase 6 artifacts**（`data/analysis/planning/`：Austen/Dickens
-  style_plan + compiled prompt + 对比报告）——然后才进入 Phase 7（generation loop /
-  revision loop，涉及真实 LLM 生成正文）。
+- **Human review of Phase 6.1 artifacts**（`data/analysis/planning/`：band_thresholds.json
+  + Austen/Dickens style_plan + compiled prompt + 对比报告）——然后才进入 Phase 7
+  （generation loop / revision loop，涉及真实 LLM 生成正文）。

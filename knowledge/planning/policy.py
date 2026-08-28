@@ -4,6 +4,9 @@
 全部纯函数：无 I/O、无 LLM、无随机。这是"哪个控制该以多强激活 + 为什么 + 怎么表达"
 的唯一权威实现（planner / compiler 复用，避免两处口径不一致）。
 
+Phase 6.1 起，连续统计特征的"怎么表达"（数值→字面 guidance）由 `bands.py` 提供
+（TRAIN-only 经验分位数阈值）；本模块只负责激活政策、预算与叙事字段的表述。
+
 自然语言描述一律为 **English**（目标生成文本为英文，且 spec §18 的示例即英文
 "tends toward longer complete sentences"）；代码注释保留中文以与库内风格一致。
 """
@@ -286,103 +289,10 @@ def select_strategies(canonicals: list[dict[str, Any]],
 
 
 # --------------------------------------------------------------------------- #
-# 数值 → 自然语言描述（确定性 banding，English）
+# 叙事 → 自然语言描述（English）
 # --------------------------------------------------------------------------- #
-# (low, high, low_label, mid_label, high_label)
-_FEATURE_BANDS: dict[str, tuple] = {
-    "dialogue_ratio": (0.2, 0.4,
-                       "dialogue is relatively sparse; narration and inner description carry the scene",
-                       "dialogue and narration are roughly balanced",
-                       "dialogue is prominent; scenes advance through character speech"),
-    "mean_sentence_length": (15.0, 22.0,
-                             "short, brisk sentences",
-                             "medium sentence length, mixing long and short",
-                             "tends toward longer complete sentences"),
-    "mean_paragraph_length": (70.0, 95.0,
-                              "shorter paragraphs, quicker pacing",
-                              "medium paragraph length",
-                              "longer paragraphs, denser exposition"),
-    "lexical_diversity": (0.70, 0.78,
-                          "frequent word reuse, a more colloquial register",
-                          "moderate lexical variety",
-                          "high lexical variety, avoids repetition"),
-    "comma_density": (60.0, 90.0,
-                      "sparse commas, few pauses",
-                      "moderate comma density",
-                      "dense commas, many subordinate clauses and parenthetical insertions"),
-    "semicolon_density": (8.0, 14.0,
-                          "rarely uses semicolons",
-                          "moderate semicolon use",
-                          "frequent semicolons, paired and antithetical constructions"),
-    "dash_density": (8.0, 14.0,
-                     "rarely uses dashes",
-                     "moderate dash use",
-                     "frequent dashes, for interruption and insertion"),
-    "quotation_density": (15.0, 30.0,
-                          "little direct quotation",
-                          "moderate direct quotation",
-                          "abundant direct quotation"),
-    "exclamation_frequency": (3.0, 8.0,
-                              "very few exclamation marks",
-                              "moderate exclamation use",
-                              "frequent exclamation marks, outward emotion"),
-    "question_frequency": (4.0, 8.0,
-                           "few interrogative sentences",
-                           "moderate use of questions",
-                           "frequent questions, rhetorical or direct"),
-    "period_density": (40.0, 60.0,
-                       "sparser sentence boundaries (longer sentences)",
-                       "moderate period density",
-                       "denser sentence boundaries (shorter sentences)"),
-    "long_sentence_ratio": (0.12, 0.2,
-                            "a low proportion of long sentences",
-                            "a moderate proportion of long sentences",
-                            "a high proportion of long sentences"),
-    "short_sentence_ratio": (0.25, 0.4,
-                             "a low proportion of short sentences",
-                             "a moderate proportion of short sentences",
-                             "a high proportion of short sentences"),
-    "sentence_length_cv": (0.6, 0.85,
-                           "little sentence-length variation, a steady rhythm",
-                           "moderate sentence-length variation",
-                           "strong sentence-length variation, marked rise and fall"),
-    "type_token_ratio": (0.5, 0.6,
-                         "a higher word-reuse rate",
-                         "moderate lexical variety",
-                         "higher lexical variety"),
-    "hapax_ratio": (0.35, 0.42,
-                    "a low proportion of rare single-occurrence words",
-                    "a moderate proportion of rare words",
-                    "a high proportion of rare words"),
-    "word_repetition_rate": (0.55, 0.65,
-                             "little repetition of high-frequency words",
-                             "moderate repetition of high-frequency words",
-                             "more repetition of high-frequency words"),
-    "mean_word_length": (4.0, 4.5,
-                         "shorter words, a more colloquial register",
-                         "medium word length",
-                         "longer words, a more formal register"),
-    "connective_density": (60.0, 80.0,
-                           "fewer connectives; clause relations are implied by word order",
-                           "moderate connective use",
-                           "more connectives; inter-sentence logic is made explicit"),
-}
-
-
-def describe_feature(feature_id: str, summary: dict[str, Any]) -> str:
-    """连续统计特征 → 自然语言（banding）；无 band 则中性兜底（不伪造精确数字）。"""
-    band = _FEATURE_BANDS.get(feature_id)
-    mean = summary.get("mean")
-    if band is not None and isinstance(mean, (int, float)) and not isinstance(mean, bool):
-        low, high, lo, mid, hi = band
-        if mean < low:
-            return lo
-        if mean > high:
-            return hi
-        return mid
-    return f"preserve the observed tendency for {feature_id.replace('_', ' ')}"
-
-
+# 注：语言特征（连续统计量）的数值→自然语言 banding 已移入 bands.py（Phase 6.1），
+# 改用 TRAIN-only 经验分位数阈值，不再用人工绝对阈值，也不自造未测量的文学机制。
 _NARRATIVE_VALUE_LABELS: dict[str, dict[str, str]] = {
     "pov": {"first": "first-person point of view", "third": "third-person point of view",
             "second": "second-person point of view"},

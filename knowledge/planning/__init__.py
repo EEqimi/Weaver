@@ -9,14 +9,20 @@
 本包全部确定性：无 LLM、无随机数、无时间戳内容、无生成正文。
 """
 from .schema import (
-    ActivationLevel, PlanningError, PlannedControl, PlannedNarrativeControl,
-    PlannedStrategy, PlannerPolicy, StylePlan, WritingRequest,
+    ActivationLevel, PlannedControl, PlannedNarrativeControl, PlannedStrategy,
+    PlannerPolicy, PlanningError, PromptBudgetError, StylePlan, WritingRequest,
 )
 from .planner import StylePlanner
 from .compiler import CompiledPrompt, PromptCompiler
+from .bands import (
+    band_label, compute_band_thresholds, describe_feature,
+    build_band_thresholds_artifact, load_band_thresholds,
+)
 
 __all__ = [
-    "ActivationLevel", "PlanningError", "PlannedControl", "PlannedNarrativeControl",
-    "PlannedStrategy", "PlannerPolicy", "StylePlan", "WritingRequest",
-    "StylePlanner", "CompiledPrompt", "PromptCompiler",
+    "ActivationLevel", "PlannedControl", "PlannedNarrativeControl",
+    "PlannedStrategy", "PlannerPolicy", "PlanningError", "PromptBudgetError",
+    "StylePlan", "WritingRequest", "StylePlanner", "CompiledPrompt",
+    "PromptCompiler", "band_label", "compute_band_thresholds", "describe_feature",
+    "build_band_thresholds_artifact", "load_band_thresholds",
 ]

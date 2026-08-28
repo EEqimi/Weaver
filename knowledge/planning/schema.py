@@ -21,6 +21,14 @@ class PlanningError(Exception):
     """planning 被拒绝（profile 完整性校验失败 / held-out 隔离不干净等）。"""
 
 
+class PromptBudgetError(Exception):
+    """提示词预算无法容纳**强制**（不可降级）内容时抛出。
+
+    语义（Phase 6.1 §3）：预算降级只丢弃可降级内容（策略 / secondary / weak 语言控制 /
+    可选解释措辞）；若连强制内容（ROLE / CONTENT / 剩余强控制 / NARRATIVE / IMPORTANT）
+    都放不下，绝不硬截断用户内容，而是显式失败。"""
+
+
 class ActivationLevel(str, Enum):
     """激活级别（有限枚举，绝不使用伪精确连续权重）。"""
     STRONG = "strong"          # 强控制（本次直接写入指令）

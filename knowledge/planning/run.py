@@ -15,6 +15,10 @@ from typing import Any
 
 from ..config import data_root as default_data_root
 from ..profiles.style_profile import AuthorStyleProfile
+from ..schema.versions import BAND_SCHEMA_VERSION
+from .bands import (
+    BAND_THRESHOLDS_FILENAME, build_band_thresholds_artifact, load_band_thresholds,
+)
 from .compiler import CompiledPrompt, PromptCompiler
 from .planner import StylePlanner
 from .schema import WritingRequest
@@ -66,18 +70,38 @@ def _load_profile(base: Path, author_id: str) -> AuthorStyleProfile:
     return profile
 
 
+def _band_thresholds(base: Path, train_work_ids: list[str]) -> dict[str, Any]:
+    """加载已持久化的经验 band 阈值；缺失或与 TRAIN 白名单不符则确定性重建。
+
+    TRAIN-only 保证：`train_work_ids` 由两位作者画像的 `author_scope.train_work_ids`
+    并集得出，非 TRAIN 的 chunk 在 `compute_band_thresholds` 中被显式排除。
+    """
+    out = base / "analysis" / PLANNING_DIRNAME / BAND_THRESHOLDS_FILENAME
+    if out.exists():
+        bt = load_band_thresholds(out)
+        if (bt.get("schema_version") == BAND_SCHEMA_VERSION
+                and set(bt.get("train_work_ids", [])) == set(train_work_ids)):
+            return bt
+    return build_band_thresholds_artifact(base, train_work_ids=train_work_ids)
+
+
 def run_planning(data_root_: Path | None = None) -> dict[str, Any]:
     base = Path(data_root_) if data_root_ is not None else default_data_root()
     out_dir = planning_layout(base)
     out_dir["root"].mkdir(parents=True, exist_ok=True)
 
-    planner = StylePlanner()
+    profiles = {aid: _load_profile(base, aid) for aid in AUTHOR_IDS}
+    train_work_ids = sorted(
+        {w for p in profiles.values() for w in p.author_scope.get("train_work_ids", [])})
+    band_thresholds = _band_thresholds(base, train_work_ids)
+
+    planner = StylePlanner(band_thresholds=band_thresholds)
     compiler = PromptCompiler()
 
     plans: dict[str, Any] = {}
     prompts: dict[str, CompiledPrompt] = {}
     for author_id in AUTHOR_IDS:
-        profile = _load_profile(base, author_id)
+        profile = profiles[author_id]
         plan = planner.plan(profile, NEUTRAL_REQUEST)
         prompt = compiler.compile(plan)
         plans[author_id] = plan
@@ -96,6 +120,13 @@ def run_planning(data_root_: Path | None = None) -> dict[str, Any]:
         "no_llm": True,
         "no_generated_prose": True,
         "writing_request": NEUTRAL_REQUEST.to_dict(),
+        "band_thresholds": {
+            "schema_version": band_thresholds.get("schema_version"),
+            "train_only": band_thresholds.get("train_only"),
+            "train_work_ids": band_thresholds.get("train_work_ids"),
+            "n_train_chunks": band_thresholds.get("n_train_chunks"),
+            "n_features": len(band_thresholds.get("features", {})),
+        },
         "authors": {
             aid: _author_summary(plans[aid], prompts[aid])
             for aid in AUTHOR_IDS
@@ -117,17 +148,20 @@ def _author_summary(plan: Any, prompt: CompiledPrompt) -> dict[str, Any]:
         "n_suppressed_controls": len(plan.suppressed_controls),
         "warnings": list(plan.warnings),
         "prompt_char_count": prompt.char_count,
-        "prompt_truncated": prompt.truncated,
+        "prompt_degraded": prompt.degraded,
+        "removed_controls": list(prompt.removed_controls),
+        "degradation_note": prompt.degradation_note,
     }
 
 
 def _render_comparison(plans: dict[str, Any], prompts: dict[str, CompiledPrompt],
                        request: WritingRequest) -> str:
     lines = [
-        "# Weaver Style Engine — Style Planner & Prompt Compiler 对比报告（Phase 6）",
+        "# Weaver Style Engine — Style Planner & Prompt Compiler 对比报告（Phase 6.1）",
         "",
         "确定性合成：`True`  无 LLM：`True`  无生成正文：`True`。",
         "同一中性写作需求分别作用于 Austen / Dickens 画像，产出各自 StylePlan 与编译提示词。",
+        "语言控制 guidance 由 **TRAIN-only 经验 band 阈值**（Q33/Q67 分位数）派生，非人工绝对值。",
         "",
         "## 中性写作需求（两者相同）",
         "",
@@ -175,8 +209,9 @@ def _render_comparison(plans: dict[str, Any], prompts: dict[str, CompiledPrompt]
             "",
             "### 编译提示词（关键数字）",
             "",
-            f"- 字符数：{prompt.char_count}  截断：`{prompt.truncated}`  "
-            f"（{prompt.truncation_note or '无'}）",
+            f"- 字符数：{prompt.char_count}  预算降级：`{prompt.degraded}`  "
+            f"（{prompt.degradation_note or '无'}）",
+            f"- 被移除的控制：{prompt.removed_controls or '无'}",
             "",
         ]
 
@@ -200,7 +235,7 @@ def _render_comparison(plans: dict[str, Any], prompts: dict[str, CompiledPrompt]
         lines.append(f"| {label} | {a} | {d} |")
     lines += [
         "",
-        "> 注：上述 guidance 为自然语言描述（banding 结果），不含任何原始数值；",
+        "> 注：上述 guidance 为自然语言描述（TRAIN-only 经验 banding 结果），不含任何原始数值；",
         "> 微观 stylometric 指纹（功能词 / 字符 n-gram / PCA / centroid）永不进入提示词。",
     ]
     return "\n".join(lines) + "\n"
@@ -214,10 +249,11 @@ def main() -> None:
               f"narrative_active={s['n_narrative_controls_active']} "
               f"strategies_active={s['n_strategies_active']} "
               f"ref={s['n_reference_controls']} supp={s['n_suppressed_controls']} "
-              f"prompt_chars={s['prompt_char_count']} truncated={s['prompt_truncated']}")
+              f"prompt_chars={s['prompt_char_count']} degraded={s['prompt_degraded']}")
     print("artifacts: data/analysis/planning/"
-          "{author_id}_style_plan.json + {author_id}_compiled_prompt.{json,md} + "
-          "planning_comparison_report.md + planning_summary.json")
+          "band_thresholds.json + {author_id}_style_plan.json + "
+          "{author_id}_compiled_prompt.{json,md} + planning_comparison_report.md + "
+          "planning_summary.json")
 
 
 if __name__ == "__main__":

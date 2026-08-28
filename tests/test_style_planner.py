@@ -10,12 +10,16 @@ from pathlib import Path
 
 import pytest
 
+from knowledge.planning.bands import (
+    band_label, compute_band_thresholds, describe_feature,
+)
 from knowledge.planning.compiler import CompiledPrompt, PromptCompiler
 from knowledge.planning.planner import StylePlanner
 from knowledge.planning.policy import language_activation
 from knowledge.planning.schema import (
     PlannedControl, PlannedNarrativeControl, PlannedStrategy, PlannerPolicy,
-    PlanningError, StylePlan, WritingRequest, make_style_plan_id,
+    PlanningError, PromptBudgetError, StylePlan, WritingRequest,
+    make_style_plan_id,
 )
 from knowledge.profiles.style_profile import (
     AuthorStyleProfile, AuthorStyleProfileSynthesizer, _reproducibility_hash,
@@ -85,6 +89,23 @@ def _pov_narrative(mode="third"):
 REQUEST = WritingRequest(
     content="A short test brief.", desired_length="short_scene",
     target_words=300, language="english", pov=None, constraints=["No new characters"])
+
+
+def _band_thresholds(feature_ids, q33=0.3, q67=0.7):
+    """合成一份最小经验 band 阈值 artifact（供测试：使特征可编译）。"""
+    return {
+        "schema_version": "0.1.0",
+        "train_only": True,
+        "features": {
+            fid: {"q33": q33, "q67": q67, "n": 100, "min": 0.0,
+                  "median": 0.5, "max": 1.0}
+            for fid in feature_ids
+        },
+    }
+
+
+def _planner(feature_ids=None, q33=0.3, q67=0.7):
+    return StylePlanner(band_thresholds=_band_thresholds(feature_ids or [], q33, q67))
 
 
 # --------------------------------------------------------------------------- #
@@ -199,7 +220,7 @@ def test_language_budget_records_suppression():
              "long_sentence_ratio", "short_sentence_ratio", "sentence_length_cv",
              "type_token_ratio", "hapax_ratio", "word_repetition_rate",
              "mean_word_length", "connective_density"]}
-    plan = StylePlanner().plan(_make_profile(full_features=full), REQUEST)
+    plan = _planner(full.keys()).plan(_make_profile(full_features=full), REQUEST)
     assert len(plan.language_controls) <= 6 + 4  # primary + secondary
     budget_dropped = [c for c in plan.suppressed_controls
                       if "suppressed_due_to_budget" in c.reason]
@@ -348,22 +369,44 @@ def test_compiled_prompt_pov_override_uses_user_pov():
                          target_words=300, language="english", pov="first")
     plan = StylePlanner().plan(_make_profile(narrative=_pov_narrative("third")), req)
     text = PromptCompiler().compile(plan).text
+    # POV 只出现在 CONTENT，不再作为 NARRATIVE 覆盖行重复出现。
     assert "first-person point of view" in text
-    assert "explicit user requirement" in text
+    assert "explicit user requirement" not in text
+    # 编译提示词里 POV 只出现一次（CONTENT-only，无 NARRATIVE 重复）。
+    assert text.count("first-person point of view") == 1
 
 
-def test_compiled_prompt_truncation_on_tiny_budget():
+def test_compiled_prompt_budget_degradation_drops_strategies_first():
     plan = StylePlanner().plan(
         _make_profile(canonicals=[_canonical(f"a::v{i}", status="validated", works=2, chunks=5)
                                   for i in range(6)]),
         REQUEST)
     full = PromptCompiler().compile(plan)
-    assert not full.truncated
-    budget = PlannerPolicy(max_prompt_chars=max(100, full.char_count - 100))
-    truncated = PromptCompiler(budget).compile(plan)
-    assert truncated.truncated is True
-    assert truncated.char_count <= budget.max_prompt_chars
-    assert "dropped" in truncated.truncation_note or "hard-truncated" in truncated.truncation_note
+    assert not full.degraded
+    budget = PlannerPolicy(max_prompt_chars=max(120, full.char_count - 100))
+    degraded = PromptCompiler(budget).compile(plan)
+    assert degraded.degraded is True
+    assert degraded.char_count <= budget.max_prompt_chars
+    assert any(r.startswith("strategy:") for r in degraded.removed_controls)
+    assert "dropped" in degraded.degradation_note
+    # 用户内容永不硬截断：CONTENT 里的核心句子仍在。
+    assert "A short test brief." in degraded.text
+
+
+def test_compiled_prompt_mandatory_overflow_raises():
+    plan = StylePlanner().plan(_make_profile(), REQUEST)
+    tiny = PlannerPolicy(max_prompt_chars=10)
+    with pytest.raises(PromptBudgetError):
+        PromptCompiler(tiny).compile(plan)
+
+
+def test_compiled_prompt_sections_reconstruct_text():
+    plan = StylePlanner().plan(
+        _make_profile(canonicals=[_canonical("a::v", status="validated", works=2, chunks=5)]),
+        REQUEST)
+    prompt = PromptCompiler().compile(plan)
+    assert len(prompt.sections) == 6
+    assert PromptCompiler._assemble(prompt.sections) == prompt.text
 
 
 # --------------------------------------------------------------------------- #
@@ -378,10 +421,18 @@ def _load_real_profile(author_id):
     return profile
 
 
+def _load_real_band_thresholds():
+    path = Path("data") / "analysis" / "planning" / "band_thresholds.json"
+    if not path.exists():
+        pytest.skip("data/analysis/planning/band_thresholds.json 不存在（gitignored）")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_real_artifacts_austen_dickens_plan_and_differ():
+    bt = _load_real_band_thresholds()
     plans = {}
     for aid in ("austen", "dickens"):
-        plans[aid] = StylePlanner().plan(_load_real_profile(aid), REQUEST)
+        plans[aid] = StylePlanner(band_thresholds=bt).plan(_load_real_profile(aid), REQUEST)
     assert plans["austen"].style_plan_id != plans["dickens"].style_plan_id
     g = {aid: next(c.guidance for c in plans[aid].language_controls
                    if c.feature_id == "dialogue_ratio") for aid in ("austen", "dickens")}
@@ -389,9 +440,162 @@ def test_real_artifacts_austen_dickens_plan_and_differ():
 
 
 def test_real_artifacts_prompt_no_author_name():
+    bt = _load_real_band_thresholds()
     for aid in ("austen", "dickens"):
-        plan = StylePlanner().plan(_load_real_profile(aid), REQUEST)
+        plan = StylePlanner(band_thresholds=bt).plan(_load_real_profile(aid), REQUEST)
         text = PromptCompiler().compile(plan).text
         for banned in ("Austen", "Dickens", "Jane", "Charles"):
             assert banned not in text
         assert text.count("## ") >= 6
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6.1：经验 band 阈值 + 预算完整性
+# --------------------------------------------------------------------------- #
+def _chunk(work_id, **feature_values):
+    return {"chunk_id": f"{work_id}_c", "work_id": work_id,
+            "features": {fid: {"value": v} for fid, v in feature_values.items()}}
+
+
+def test_band_thresholds_train_only():
+    chunks = [
+        _chunk("emma", comma_density=10.0),
+        _chunk("pride_and_prejudice", comma_density=20.0),
+        _chunk("persuasion", comma_density=999.0),  # held-out，必须被排除
+    ]
+    bt = compute_band_thresholds(chunks, train_work_ids=["emma", "pride_and_prejudice"])
+    assert set(bt["train_work_ids"]) == {"emma", "pride_and_prejudice"}
+    assert bt["train_only"] is True
+    f = bt["features"]["comma_density"]
+    assert f["n"] == 2
+    assert f["max"] == 20.0  # 999 被排除
+
+
+def test_band_thresholds_held_out_does_not_affect():
+    base = [_chunk("emma", comma_density=10.0), _chunk("emma", comma_density=20.0)]
+    with_held = base + [_chunk("persuasion", comma_density=999.0)]
+    a = compute_band_thresholds(base, train_work_ids=["emma"])
+    b = compute_band_thresholds(with_held, train_work_ids=["emma"])
+    assert a["features"] == b["features"]  # held-out 不改变阈值
+    assert b["n_train_chunks"] == 2
+
+
+def test_band_thresholds_deterministic():
+    chunks = [_chunk("emma", comma_density=10.0),
+              _chunk("pride_and_prejudice", comma_density=20.0)]
+    assert compute_band_thresholds(chunks) == compute_band_thresholds(chunks)
+
+
+def test_band_thresholds_shared_across_authors():
+    chunks = [
+        _chunk("emma", comma_density=10.0),
+        _chunk("pride_and_prejudice", comma_density=20.0),
+        _chunk("great_expectations", comma_density=30.0),
+        _chunk("david_copperfield", comma_density=40.0),
+    ]
+    bt = compute_band_thresholds(chunks)
+    # 一份跨作者合并阈值（非 per-author），两位作者共用同一 band 系统。
+    assert "q33" in bt["features"]["comma_density"]
+    assert "q67" in bt["features"]["comma_density"]
+    assert "austen" not in bt["features"] and "dickens" not in bt["features"]
+
+
+def test_band_label_tertiles():
+    bt = _band_thresholds(["f"], q33=0.3, q67=0.7)
+    assert band_label("f", 0.1, bt) == "low"
+    assert band_label("f", 0.3, bt) == "medium"  # 边界 ∈ medium
+    assert band_label("f", 0.5, bt) == "medium"
+    assert band_label("f", 0.7, bt) == "medium"
+    assert band_label("f", 0.9, bt) == "high"
+    assert band_label("f", 0.5, None) is None
+
+
+def test_describe_feature_literal_no_overclaim():
+    bt = _band_thresholds(["comma_density", "semicolon_density", "mean_sentence_length"])
+    comma_high = describe_feature("comma_density", {"mean": 0.9}, bt)
+    assert comma_high == "Use commas relatively frequently."
+    for banned in ("subordinate", "parenthetical", "clause", "insertion"):
+        assert banned not in comma_high
+    semi_high = describe_feature("semicolon_density", {"mean": 0.9}, bt)
+    assert semi_high == "Use semicolons relatively frequently."
+    for banned in ("antithetical", "paired", "construction"):
+        assert banned not in semi_high
+    # 长句：字面指令，不附会"从句/插入语"等未测机制
+    long_sent = describe_feature("mean_sentence_length", {"mean": 0.9}, bt)
+    assert long_sent == "Favor relatively long sentences."
+
+
+def test_describe_feature_no_band_returns_none():
+    assert describe_feature("comma_density", {"mean": 0.5}, _band_thresholds([])) is None
+    assert describe_feature("unknown_feature", {"mean": 0.5},
+                            _band_thresholds(["unknown_feature"])) is None
+    assert describe_feature("comma_density", {"mean": None},
+                            _band_thresholds(["comma_density"])) is None
+
+
+def test_not_compilable_downgraded_to_reference():
+    profile = _make_profile(
+        full_features={"mean_sentence_length": _feature_summary(
+            mean=17.3, variance=32.0, std=5.6)})
+    plan = StylePlanner(band_thresholds=_band_thresholds([])).plan(profile, REQUEST)
+    refs = {c.feature_id: c for c in plan.reference_controls}
+    assert "mean_sentence_length" in refs
+    assert refs["mean_sentence_length"].activation == "reference"
+    assert "not_compilable" in refs["mean_sentence_length"].reason
+    assert plan.language_controls == []
+
+
+def test_long_content_never_hard_truncated():
+    long_content = ("A young woman returns to her family's country house. " * 40).strip()
+    req = WritingRequest(content=long_content, desired_length="short_scene",
+                         target_words=400, language="english", pov=None,
+                         constraints=["No new characters"])
+    profile = _make_profile(canonicals=[_canonical(f"a::v{i}", status="validated",
+                                                   works=2, chunks=5) for i in range(6)])
+    plan = _planner([]).plan(profile, req)
+    for budget_chars in (300, 1000, 3000, 10000):
+        policy = PlannerPolicy(max_prompt_chars=budget_chars)
+        try:
+            prompt = PromptCompiler(policy).compile(plan)
+        except PromptBudgetError:
+            continue  # 强制内容放不下 → 显式失败，绝不截断
+        assert long_content in prompt.text  # 内容永不丢失/切片
+
+
+def test_low_priority_removed_before_mandatory():
+    full = {fid: _feature_summary(mean=50.0) for fid in
+            ["comma_density", "semicolon_density", "dash_density", "quotation_density",
+             "exclamation_frequency", "question_frequency", "period_density",
+             "long_sentence_ratio", "short_sentence_ratio", "sentence_length_cv",
+             "type_token_ratio", "hapax_ratio", "word_repetition_rate",
+             "mean_word_length", "connective_density"]}
+    profile = _make_profile(full_features=full,
+                            canonicals=[_canonical(f"a::v{i}", status="validated",
+                                                   works=2, chunks=5) for i in range(6)])
+    plan = _planner(full.keys()).plan(profile, REQUEST)
+    full_prompt = PromptCompiler().compile(plan)
+    degraded = PromptCompiler(
+        PlannerPolicy(max_prompt_chars=full_prompt.char_count - 600)).compile(plan)
+    assert degraded.degraded
+    # 只移除策略/语言控制/措辞，绝不动用户内容
+    assert "A short test brief." in degraded.text
+    assert all(r.startswith(("strategy:", "language:", "wording:"))
+               for r in degraded.removed_controls)
+    # 降级顺序：策略先于语言控制
+    seen_lang = False
+    for r in degraded.removed_controls:
+        if r.startswith("language:"):
+            seen_lang = True
+        elif r.startswith("strategy:"):
+            assert not seen_lang, "strategy 在 language control 之后被移除（顺序错误）"
+
+
+def test_real_band_thresholds_train_only():
+    bt = _load_real_band_thresholds()
+    assert bt["train_only"] is True
+    train = set(bt["train_work_ids"])
+    assert train == {"emma", "pride_and_prejudice",
+                     "great_expectations", "david_copperfield"}
+    assert "persuasion" not in train and "tale_of_two_cities" not in train
+    assert bt["n_train_chunks"] == 2328
+    assert len(bt["features"]) == 22
