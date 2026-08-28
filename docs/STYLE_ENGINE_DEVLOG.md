@@ -918,6 +918,84 @@ artifact（引用 `stylometric_author_targets.json`）+ artifact_keys（centroid
 
 ---
 
+## Checkpoint — Phase 6: Style Planner & Prompt Compiler（画像 → 计划 → 提示词）
+
+**Status:** COMPLETE — REVIEW PENDING（停在 review 检查点，未进入 Phase 7）
+
+### Goal
+建立三层严格分离的确定性管线：`AuthorStyleProfile`（观察到了什么，只读）→
+`StylePlanner` → `StylePlan`（本次激活哪些控制）→ `PromptCompiler` → 生成提示词。
+绝不把画像 JSON 直接塞进提示词；绝不在提示词中提作者名 / 模仿；绝不写微观 stylometric
+指令；绝不改写用户 core story facts / 人物关系 / 约束。
+
+### Implementation（`knowledge/planning/`）
+- `schema.py`：`WritingRequest`（content/desired_length/target_words/language/pov/
+  constraints，`__post_init__` 校验非空）、`ActivationLevel`（strong/medium/weak/
+  reference/suppressed 有限枚举，无伪连续权重）、`PlannedControl` / `PlannedNarrativeControl`
+  / `PlannedStrategy`、`PlannerPolicy`（可配置预算 + candidate_core 门槛）、`StylePlan`
+  （style_plan_id/schema_version/author_id/source_profile_hash/writing_request/
+  language_controls/narrative_controls/strategy_controls/reference_controls/
+  reference_strategy_controls/suppressed_controls/warnings/planner_metadata），
+  `make_style_plan_id`（sha256 确定性 id）。
+- `policy.py`（纯函数，唯一政策权威）：
+  - `language_activation`：diagnostic→suppressed（绝不控制生成）；core→strong（预留）；
+    experimental→reference（仅 40-chunk LLM 采样）；candidate_core→确定性门槛
+    `_gate_candidate_core`（n_valid/n_expected 完整度、missing/insufficient/unobservable、
+    zero-variance、source_scope、相对离散度），**绝不晋升 core**；descriptive→weak。
+  - `assign_language_buckets`：primary/secondary/reference/suppressed 四桶 + 预算，
+    超出进 suppressed 且 reason=`suppressed_due_to_budget`（不静默）。
+  - `narrative_activation` + `apply_narrative_budget`：sampled（40-chunk）→ 不超 medium；
+    用户显式 pov 覆盖作者倾向（overridden=True，不 reject）。
+  - `select_strategies`：validated > candidate > discovered；discovered 默认 reference，
+    溢出进 reference 不丢弃。
+  - 数值→自然语言 banding（`describe_feature` / `describe_narrative`，English），
+    如 dialogue_ratio 0.43→"dialogue is prominent…"、0.10→"dialogue is relatively sparse…"。
+- `planner.py`：`StylePlanner.plan` 先做画像完整性校验（`verify_reproducibility_hash()`
+  + held-out 隔离 clean，否则抛 `PlanningError` fail-closed），再合成三路控制与 warnings
+  （candidate_core≠core 提示、pov 冲突提示）、planner_metadata（预留 conflicts/
+  resolution_required，单作者恒空）。
+- `compiler.py`：`PromptCompiler.compile` → `CompiledPrompt`（ROLE / CONTENT / STYLE
+  CONTROL / NARRATIVE / CONDITIONAL STRATEGIES / IMPORTANT 六段）。策略渲染为
+  `WHEN trigger → THEN operation → TO effect` 条件规则（剥离 trigger_summary 开头的
+  "When"）；确定性预算截断（超出 max_prompt_chars 从末尾策略起丢弃并记录）。
+- `run.py`：加载 Austen/Dickens 画像（from_dict + hash + held-out 校验）→ 同一中性
+  WritingRequest → plan + compile → 落盘 `data/analysis/planning/` 对比产物 + 报告。
+- `versions.py`：新增 `WRITING_REQUEST_SCHEMA_VERSION` / `STYLE_PLAN_SCHEMA_VERSION` /
+  `STYLE_PLANNER_VERSION` / `PROMPT_COMPILER_VERSION`（均 0.1.0，独立，不影响既有缓存）。
+
+### 激活政策（关键约定）
+- core → strong（未来正式核心；V0.1 无 core）。
+- candidate_core → 门槛 gate（不晋升 core）：full-corpus + 完整 + 稳定 → strong；
+  sampled scope / 高相对离散 → medium；完整度 < 0.5 / 证据不足 → weak 或 suppressed。
+- descriptive → weak（辅助）；experimental → reference_only；diagnostic → 绝不在提示词。
+- 策略：validated/candidate → active（≤ max_strategies）；discovered → reference（不主动）。
+
+### 产物（确定性，同一 brief、不同画像）
+- Austen：10 激活语言控制（4 candidate_core strong + 6 descriptive weak）、4 叙事激活
+  （third-person / low narrator presence / internal focalization / close distance）、
+  6 active 策略（Free Indirect Discourse 等）、8 reference、12 suppressed；
+  提示词 4834 chars、未截断。
+- Dickens：同样 10/4/6 结构，但方向相反——dialogue_ratio "sparse"（vs Austen
+  "prominent"）、first-person（vs third）、comma_density "dense"（vs moderate）、
+  mean_paragraph_length "medium"（vs "longer paragraphs"）；策略为
+  Character revelation through dialogue / Objectification of emotion 等；5098 chars。
+- 落盘：`data/analysis/planning/{austen,dickens}_{style_plan,compiled_prompt}.json`、
+  `{austen,dickens}_compiled_prompt.md`、`planning_comparison_report.md`、
+  `planning_summary.json`。
+
+### Tests
+- **223 passed**（was 191）：新增 32 个 Phase 6 测试（schema 往返、空 content 拒绝、
+  激活政策 7 例、语言/叙事/策略预算、experimental→reference、POV 覆盖 + 无冲突时不警告、
+  hash/held-out fail-closed、plan/prompt 确定性、提示词六段、不提作者名 / 不写微观
+  stylometric、保留用户 brief、POV 覆盖写入提示词、预算截断、真实产物 Austen/Dickens
+  计划互异 + 提示词不提作者名）。
+
+### Non-goals（本次明确不做）
+- 未调用任何 LLM（DeepSeek/Qwen/其他）；未生成任何小说正文；未实现 evaluation /
+  revision loop（Phase 7+）；未实现多作者风格混合（conflicts 结构仅预留）。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

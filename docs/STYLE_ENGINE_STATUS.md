@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 5.1 (profile integrity + author-specific stylometric targets) — COMPLETE (REVIEW PENDING): fail-closed held-out isolation, resolved provenance, round-trip deserialization, author-specific TRAIN-only stylometric targets; no LLM; Phase 6 not started |
-| **Last completed checkpoint** | AuthorStyleProfile integrity fix: `author_target` vs `validation_metadata` split, `ProfileSynthesisError` fail-closed, `from_dict`+hash verify, `stylometric_author_targets.json`; Austen 26 / Dickens 36 preserved; 191 tests |
+| **Current phase** | Phase 6 (Style Planner & Prompt Compiler) — COMPLETE (REVIEW PENDING): three-layer separation profile → StylePlan → prompt; deterministic activation policy + control budget + natural-language banding; no LLM, no generated prose; Phase 7 (generation loop) not started |
+| **Last completed checkpoint** | StylePlanner + PromptCompiler: `WritingRequest`/`StylePlan` schema, `PlannerPolicy`, candidate_core gate, control budget (never silent-drop), POV override, strategy selection, Austen/Dickens comparison artifacts; 223 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -35,7 +35,9 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 ## What is not implemented yet
 - Full-corpus LLM feature extraction (only the 40-chunk calibration sample has LLM features).
-- Phase 6 and beyond (style mixing, planner, prompt compiler, generation loop, revision loop).
+- Phase 7 and beyond (generation loop, revision loop, evaluation loop).
+- Multi-author style mixing (the `conflicts` / `resolution_required` structure is reserved in
+  `StylePlan.planner_metadata`, currently empty for single-author planning).
 - NlpAnalyzer (POS) features — NLTK intentionally not installed.
 - Mixed-effects / variance-decomposition model (deferred by spec).
 
@@ -66,12 +68,36 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - Austen target: n=833 / [emma, p&p] / centroid_norm 0.098128 / within_cosine 0.174174；
   Dickens target: n=1495 / [dc, ge] / centroid_norm 0.103634 / within_cosine 0.155668（互异）。
 
+## Phase 6 (Style Planner & Prompt Compiler) — COMPLETE (REVIEW PENDING)
+- `knowledge/planning/`：`schema.py`（WritingRequest / StylePlan / PlannerPolicy /
+  ActivationLevel）、`policy.py`（激活政策 + 控制预算 + 数值→自然语言 banding，纯函数）、
+  `planner.py`（`StylePlanner.plan`，画像完整性 fail-closed）、`compiler.py`
+  （`PromptCompiler.compile` → 六段提示词）、`run.py`（Austen/Dickens 对比产物）。
+- 三层严格分离：画像（观察）→ StylePlan（本次激活哪些控制）→ 提示词（可执行指令）；
+  绝不 dump 画像 JSON，绝不提作者名，绝不写微观 stylometric 指令，绝不改写用户 brief。
+- 激活政策：candidate_core 确定性门槛（完整度/证据/source_scope/离散度），**绝不晋升
+  core**；descriptive→weak；experimental→reference_only；diagnostic→绝不在提示词。
+  激活级别 strong/medium/weak/reference/suppressed（有限枚举，无伪连续权重）。
+- 控制预算可配置（primary≤6 / secondary≤4 / narrative≤4 / strategies≤6），超出显式记
+  `suppressed_due_to_budget`（绝不静默丢弃）；用户显式 pov 覆盖作者倾向（warning，不 reject）。
+- 策略选择 validated > candidate > discovered（discovered 保持 reference）；条件规则
+  `WHEN → THEN → TO`。
+- 产物：`data/analysis/planning/`（Austen/Dickens style_plan + compiled prompt + 对比报告
+  + 汇总）。同一中性 brief：Austen dialogue "prominent" + third-person + low narrator
+  presence vs Dickens dialogue "sparse" + first-person + medium narrator presence。
+
 ## Current corpus
 - **TRAIN:** Pride and Prejudice, Emma (Austen); Great Expectations, David Copperfield (Dickens).
 - **HELD-OUT:** Persuasion (Austen); A Tale of Two Cities (Dickens).
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
+- **223 tests passed** (was 191). +32 Phase 6 tests: schema 往返（WritingRequest/Policy/
+  PlannedControl/PlannedStrategy/StylePlan）、空 content 拒绝、激活政策 7 例（candidate_core
+  strong / insufficient / sampled / descriptive / experimental / diagnostic）、语言/叙事/策略
+  预算（不静默丢弃）、experimental→reference、POV 覆盖 + 同视角不警告、hash/held-out
+  fail-closed、plan/prompt 确定性、提示词六段、不提作者名 / 不写微观 stylometric、保留用户
+  brief、POV 覆盖写入提示词、预算截断、真实产物 Austen/Dickens 计划互异 + 提示词不提作者名。
 - **191 tests passed** (was 182). +9 Phase 5.1 tests: diagnostics 拆分（author_target /
   validation_metadata）、作者目标互异、concrete provenance 无 `{author_id}` 占位符、纯函数
   TRAIN-only 目标计算、真实产物 Austen/Dickens 目标互异、往返序列化精确相等、reload 后 hash
@@ -167,9 +193,10 @@ Short current-state snapshot (≈1–2 min read). History lives in
   evidence; 2 stay `validated` despite it (monotonic lifecycle masked the crossover).
   Author-scoped `support_status` recomputes correctly; the global registry `status` must
   not be read as an author-level claim.
-- `candidate_core` 特征仍不得晋升（校准仅标定样本，不足以晋升）。
+- `candidate_core` 特征仍不得晋升（校准仅标定样本，不足以晋升）——Phase 6 已把这一条
+  落实为确定性门槛 gate 并写入 warning：strong 激活的 candidate_core 仍是 CANDIDATE。
 
 ## Next planned action
-- **Human review of Phase 5.1 artifacts**（`data/analysis/style_profiles/`，含
-  `stylometric_author_targets.json`）——然后才进入 Phase 6（style mixing / planner /
-  generation loop）。
+- **Human review of Phase 6 artifacts**（`data/analysis/planning/`：Austen/Dickens
+  style_plan + compiled prompt + 对比报告）——然后才进入 Phase 7（generation loop /
+  revision loop，涉及真实 LLM 生成正文）。

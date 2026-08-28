@@ -28,3 +28,10 @@ SAMPLING_VERSION = "0.1.0"
 # canonical strategy set + stylometry 的**确定性合成**（不重新分析、不调用 LLM），
 # 因此独立版本，避免影响既有 aggregation/consolidation 缓存与产物。
 AUTHOR_STYLE_PROFILE_SCHEMA_VERSION = "0.1.0"
+
+# Phase 6：Style Planner & Prompt Compiler（确定性，无 LLM，无生成正文）。
+# 独立版本，避免影响既有画像/聚合/consolidation 的缓存与产物。
+WRITING_REQUEST_SCHEMA_VERSION = "0.1.0"
+STYLE_PLAN_SCHEMA_VERSION = "0.1.0"
+STYLE_PLANNER_VERSION = "0.1.0"
+PROMPT_COMPILER_VERSION = "0.1.0"
