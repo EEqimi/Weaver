@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 5 (author-profile synthesis) — COMPLETE (REVIEW PENDING): deterministic `AuthorStyleProfile` built from Phase 1–4.5 artifacts; no LLM, no re-analysis; stopped for human review, Phase 6 not started |
-| **Last completed checkpoint** | Author style-profile synthesis: `AuthorStyleProfileSynthesizer` + `calibration/synthesize.py`; Austen 26 / Dickens 36 canonical strategies preserved; 182 tests |
+| **Current phase** | Phase 5.1 (profile integrity + author-specific stylometric targets) — COMPLETE (REVIEW PENDING): fail-closed held-out isolation, resolved provenance, round-trip deserialization, author-specific TRAIN-only stylometric targets; no LLM; Phase 6 not started |
+| **Last completed checkpoint** | AuthorStyleProfile integrity fix: `author_target` vs `validation_metadata` split, `ProfileSynthesisError` fail-closed, `from_dict`+hash verify, `stylometric_author_targets.json`; Austen 26 / Dickens 36 preserved; 191 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -53,12 +53,29 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 产物：`data/analysis/style_profiles/`（Austen 26 / Dickens 36 canonical 数量与 support_status
   与 Phase 4.5 完全一致）。**停止等待人工 review，未进入 Phase 6。**
 
+## Phase 5.1 (profile integrity + author-specific stylometric targets) — COMPLETE (REVIEW PENDING)
+- `diagnostics.stylometry` 拆为 `author_target`（作者专属质心/离散度，compact 标量 + 引用
+  `stylometric_author_targets.json`）与 `validation_metadata`（全局实验元数据）。
+- 作者目标纯函数 `_author_targets_from_matrix` 只收 TRAIN 侧数据（X_train / train_authors /
+  train_works），从签名杜绝 held-out；`fit_scope=train_only`、`no_held_out=True`。
+- held-out 隔离 **fail-closed**：`clean=False` 抛 `ProfileSynthesisError`，先内存合成、成功
+  后统一落盘，污染即不写任何产物。
+- provenance 路径解析为具体 `austen`/`dickens`（无 `{author_id}` 占位符，非绝对路径）。
+- `AuthorStyleProfile.from_dict` + 嵌套 from_dict + `verify_reproducibility_hash()`；错误
+  schema_version / 缺字段抛 `ProfileSchemaError`。
+- Austen target: n=833 / [emma, p&p] / centroid_norm 0.098128 / within_cosine 0.174174；
+  Dickens target: n=1495 / [dc, ge] / centroid_norm 0.103634 / within_cosine 0.155668（互异）。
+
 ## Current corpus
 - **TRAIN:** Pride and Prejudice, Emma (Austen); Great Expectations, David Copperfield (Dickens).
 - **HELD-OUT:** Persuasion (Austen); A Tale of Two Cities (Dickens).
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
+- **191 tests passed** (was 182). +9 Phase 5.1 tests: diagnostics 拆分（author_target /
+  validation_metadata）、作者目标互异、concrete provenance 无 `{author_id}` 占位符、纯函数
+  TRAIN-only 目标计算、真实产物 Austen/Dickens 目标互异、往返序列化精确相等、reload 后 hash
+  复核、错误 schema_version 拒绝、缺字段拒绝。
 - **182 tests passed** (was 167). +15 Phase 5 tests: control-role 映射、diagnostic 不进
   generation、direct/conditional/reference-only 分桶、canonical 数量保持、support_status
   保持、不确定性不伪造 0、narrative not_observable 保留、full-corpus vs sampled scope、
@@ -153,5 +170,6 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - `candidate_core` 特征仍不得晋升（校准仅标定样本，不足以晋升）。
 
 ## Next planned action
-- **Human review of Phase 5 artifacts**（`data/analysis/style_profiles/`）——然后才进入
-  Phase 6（style mixing / planner / generation loop）。
+- **Human review of Phase 5.1 artifacts**（`data/analysis/style_profiles/`，含
+  `stylometric_author_targets.json`）——然后才进入 Phase 6（style mixing / planner /
+  generation loop）。

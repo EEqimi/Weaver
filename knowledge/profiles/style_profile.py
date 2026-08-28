@@ -34,6 +34,19 @@ from ..schema.narrative_schema import (
     DETAIL_DIMENSIONS, PACE_DIMENSIONS,
 )
 
+
+class ProfileSynthesisError(Exception):
+    """合成阶段遇到隔离/一致性冲突（如 held-out 污染）→ 必须 fail-closed。
+
+    一旦抛出，runner 不得写出任何有效 AuthorStyleProfile 产物（宁可失败也不产出
+    越过实验边界的画像）。
+    """
+
+
+class ProfileSchemaError(ValueError):
+    """AuthorStyleProfile 反序列化/校验失败（缺失必填字段 / schema 版本不匹配）。"""
+
+
 # --------------------------------------------------------------------------- #
 # 画像角色（placement/bucket 概念，派生自已有的 registry control_role，见映射表）
 # --------------------------------------------------------------------------- #
@@ -60,6 +73,16 @@ _REGISTRY_ROLE_TO_PROFILE_ROLE: dict[str, str] = {
     "experimental": ProfileControlRole.REFERENCE_ONLY.value,
 }
 
+# Phase 6 语义约定（本阶段不实现 Style Planner，仅显式声明，供 Phase 6 消费）：
+#   - core            ：default 强激活候选（全语料统计、人类可解释、可直接左右写作）。
+#   - candidate_core  ：可 direct-controllable，但 Phase 6 必须由 support / uncertainty /
+#                       variance 门槛 gate（校准仅 40-chunk，证据不足直接强激活）。**绝不晋升 core**。
+#   - descriptive     ：辅助/弱控制（描述性统计，弱于 core 的激活强度）。
+#   - experimental    ：reference_only（仅 40-chunk 采样 LLM 派生，不主动控制）。
+#   - diagnostic      ：仅评估用（stylometric 指纹），**绝不进入 generation controls**。
+# Phase 5 的 candidate_core→direct_control 映射保留（画像仍记录其可控性），但画像不判断
+# "该不该激活"——那是 Phase 6 的门槛职责。
+
 # strategy 优先级：support_status 的层级（validated > candidate > discovered）
 _STATUS_TIER = {"validated": 3, "candidate": 2, "discovered": 1}
 
@@ -83,6 +106,13 @@ def _registry_role(feature_id: str) -> str:
 def _profile_role(registry_role: str) -> str:
     """确定性映射 registry control_role → 画像角色（未知 → reference_only，不猜测）。"""
     return _REGISTRY_ROLE_TO_PROFILE_ROLE.get(registry_role, ProfileControlRole.REFERENCE_ONLY.value)
+
+
+def _require(d: dict[str, Any], *keys: str) -> None:
+    """反序列化校验：缺失必填字段即抛 ProfileSchemaError（绝不静默接受）。"""
+    missing = [k for k in keys if k not in d]
+    if missing:
+        raise ProfileSchemaError(f"缺少必填字段: {missing}")
 
 
 # --------------------------------------------------------------------------- #
@@ -112,6 +142,17 @@ class GenerationControl:
             "source_artifact": self.source_artifact,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "GenerationControl":
+        _require(d, "feature_id", "control_role", "source_scope", "measurement_type",
+                 "value_type", "registry_control_role", "summary", "source_artifact")
+        return cls(
+            feature_id=d["feature_id"], control_role=d["control_role"],
+            source_scope=d["source_scope"], measurement_type=d["measurement_type"],
+            value_type=d["value_type"], registry_control_role=d["registry_control_role"],
+            summary=d["summary"], source_artifact=d["source_artifact"],
+        )
+
 
 @dataclass
 class NarrativeControl:
@@ -132,6 +173,16 @@ class NarrativeControl:
             "summary": self.summary,
             "source_artifact": self.source_artifact,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "NarrativeControl":
+        _require(d, "field", "control_role", "source_scope", "value_type",
+                 "summary", "source_artifact")
+        return cls(
+            field=d["field"], control_role=d["control_role"],
+            source_scope=d["source_scope"], value_type=d["value_type"],
+            summary=d["summary"], source_artifact=d["source_artifact"],
+        )
 
 
 @dataclass
@@ -174,6 +225,32 @@ class StrategyControl:
             "source_artifact": self.source_artifact,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "StrategyControl":
+        _require(d, "canonical_strategy_id", "canonical_name", "canonical_description",
+                 "trigger_summary", "operation_summary", "effect_summary", "control_role",
+                 "source_scope", "support_status", "confidence", "source_strategy_ids",
+                 "supporting_work_ids", "supporting_chunk_ids", "control_priority",
+                 "priority_components", "source_artifact")
+        return cls(
+            canonical_strategy_id=d["canonical_strategy_id"],
+            canonical_name=d["canonical_name"],
+            canonical_description=d["canonical_description"],
+            trigger_summary=d["trigger_summary"],
+            operation_summary=d["operation_summary"],
+            effect_summary=d["effect_summary"],
+            control_role=d["control_role"],
+            source_scope=d["source_scope"],
+            support_status=d["support_status"],
+            confidence=d["confidence"],
+            source_strategy_ids=list(d["source_strategy_ids"]),
+            supporting_work_ids=list(d["supporting_work_ids"]),
+            supporting_chunk_ids=list(d["supporting_chunk_ids"]),
+            control_priority=d["control_priority"],
+            priority_components=d["priority_components"],
+            source_artifact=d["source_artifact"],
+        )
+
 
 @dataclass
 class AuthorStyleProfile:
@@ -202,6 +279,36 @@ class AuthorStyleProfile:
             "provenance": self.provenance,
             "reproducibility_hash": self.reproducibility_hash,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "AuthorStyleProfile":
+        _require(d, "author_id", "schema_version", "author_scope", "generation_controls",
+                 "narrative_controls", "strategy_controls", "diagnostics", "uncertainty",
+                 "provenance", "reproducibility_hash")
+        if d["schema_version"] != AUTHOR_STYLE_PROFILE_SCHEMA_VERSION:
+            raise ProfileSchemaError(
+                f"schema_version 不匹配: 期望 {AUTHOR_STYLE_PROFILE_SCHEMA_VERSION}, "
+                f"得到 {d['schema_version']!r}")
+        return cls(
+            author_id=d["author_id"],
+            schema_version=d["schema_version"],
+            author_scope=d["author_scope"],
+            generation_controls={k: GenerationControl.from_dict(v)
+                                 for k, v in d["generation_controls"].items()},
+            narrative_controls={k: NarrativeControl.from_dict(v)
+                                for k, v in d["narrative_controls"].items()},
+            strategy_controls=[StrategyControl.from_dict(s) for s in d["strategy_controls"]],
+            diagnostics=d["diagnostics"],
+            uncertainty=d["uncertainty"],
+            provenance=d["provenance"],
+            reproducibility_hash=d["reproducibility_hash"],
+        )
+
+    def verify_reproducibility_hash(self) -> bool:
+        """重算 sha256 并核对（加载后完整性校验）。"""
+        body = self.to_dict()
+        body.pop("reproducibility_hash", None)
+        return _reproducibility_hash(body) == self.reproducibility_hash
 
 
 # --------------------------------------------------------------------------- #
@@ -277,23 +384,32 @@ class AuthorStyleProfileSynthesizer:
         sampled_features: dict[str, dict[str, Any]],
         sampled_narrative: dict[str, Any],
         canonical_strategies: list[dict[str, Any]],
-        stylometry_diagnostics: dict[str, Any],
+        stylometry_author_target: dict[str, Any],
+        stylometry_validation_metadata: dict[str, Any],
     ) -> AuthorStyleProfile:
+        author_scope = self._build_author_scope(
+            author_id, train_work_ids, held_out_work_ids, profile_work_ids,
+            canonical_strategies)
+        iso = author_scope["held_out_isolation"]
+        if not iso["clean"]:
+            raise ProfileSynthesisError(
+                f"{author_id}: held-out 隔离校验失败（fail-closed），拒绝写出画像。"
+                f" profile 污染={iso['profile_held_out_contamination']} "
+                f" strategy 污染={iso['strategy_held_out_contamination']}")
         profile = AuthorStyleProfile(
             author_id=author_id,
             schema_version=AUTHOR_STYLE_PROFILE_SCHEMA_VERSION,
-            author_scope=self._build_author_scope(
-                author_id, train_work_ids, held_out_work_ids, profile_work_ids,
-                canonical_strategies),
+            author_scope=author_scope,
             generation_controls=self._build_generation_controls(
                 full_corpus_features, sampled_features),
             narrative_controls=self._build_narrative_controls(sampled_narrative),
-            strategy_controls=self._build_strategy_controls(canonical_strategies),
-            diagnostics=self._build_diagnostics(stylometry_diagnostics),
+            strategy_controls=self._build_strategy_controls(canonical_strategies, author_id),
+            diagnostics=self._build_diagnostics(
+                stylometry_author_target, stylometry_validation_metadata),
             uncertainty=self._build_uncertainty(
                 full_corpus_features, sampled_features, sampled_narrative,
                 canonical_strategies),
-            provenance=self._build_provenance(),
+            provenance=self._build_provenance(author_id),
         )
         # reproducibility hash 覆盖除 hash 自身外的全部内容
         body = profile.to_dict()
@@ -393,7 +509,8 @@ class AuthorStyleProfileSynthesizer:
         return controls
 
     @staticmethod
-    def _build_strategy_controls(canonicals: list[dict[str, Any]]) -> list[StrategyControl]:
+    def _build_strategy_controls(canonicals: list[dict[str, Any]],
+                                 author_id: str) -> list[StrategyControl]:
         """canonical strategies → conditional_control，附确定性 priority。"""
         ranked = rank_canonical_strategies(canonicals)
         out: list[StrategyControl] = []
@@ -414,19 +531,23 @@ class AuthorStyleProfileSynthesizer:
                 supporting_chunk_ids=list(cs.get("supporting_chunk_ids", [])),
                 control_priority=cs["control_priority"],
                 priority_components=cs["priority_components"],
-                source_artifact="data/analysis/consolidation/{author_id}_canonical_strategies.json",
+                source_artifact=f"data/analysis/consolidation/{author_id}_canonical_strategies.json",
             ))
         return out
 
     @staticmethod
-    def _build_diagnostics(stylometry_diagnostics: dict[str, Any]) -> dict[str, Any]:
-        """stylometric diagnostics：只做生成后相似度诊断，绝不进入 generation controls。"""
+    def _build_diagnostics(author_target: dict[str, Any],
+                           validation_metadata: dict[str, Any]) -> dict[str, Any]:
+        """stylometric diagnostics：拆为 author_target（作者专属指纹）与
+        validation_metadata（全局实验元数据）。只做生成后相似度诊断，绝不进入 generation
+        controls。"""
         return {
             "stylometry": {
                 "control_role": ProfileControlRole.DIAGNOSTIC.value,
                 "note": ("char 3-gram / function-word fingerprint / PCA / Delta 等微观统计指纹，"
                          "仅用于生成后相似度与作者判别诊断，不作为写作控制指令。"),
-                **stylometry_diagnostics,
+                "author_target": author_target,
+                "validation_metadata": validation_metadata,
             },
         }
 
@@ -478,13 +599,15 @@ class AuthorStyleProfileSynthesizer:
         }
 
     @staticmethod
-    def _build_provenance() -> dict[str, Any]:
+    def _build_provenance(author_id: str) -> dict[str, Any]:
         return {
             "sources": [
                 "data/analysis/profiles/author_profiles.json",          # 全语料 Layer A 统计
                 "data/analysis/calibration/profiles/author_profiles.json",  # sampled Layer A/B/C
-                "data/analysis/consolidation/{author_id}_canonical_strategies.json",  # 作者级 canonical
+                f"data/analysis/consolidation/{author_id}_canonical_strategies.json",  # 作者级 canonical
                 "data/analysis/stylometry/{baseline,index}.json",       # Layer D 诊断
+                "data/analysis/stylometry/matrix.npz",                  # Layer D TRAIN 特征矩阵（作者质心来源）
+                "data/analysis/style_profiles/stylometric_author_targets.json",  # 作者专属文体学目标
             ],
             "authoritative_strategy_source": "author-scoped canonical strategies + support_status",
             "note": ("global strategy_registry.status 为跨作者单调生命周期，不作为作者级 canonical "

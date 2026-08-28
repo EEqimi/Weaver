@@ -858,6 +858,66 @@ Planner 使用。纯合成：不重新分析文本、不调用任何 LLM、不�
 
 ---
 
+## Checkpoint — Phase 5.1: AuthorStyleProfile 完整性 + 作者专属文体学目标
+
+**Status:** COMPLETE — REVIEW PENDING（最后停止，等待人工 review；未进入 Phase 6）
+
+### Goal
+按 review 意见补强 Phase 5：(1) 作者专属 stylometric 目标（质心/离散度），而非全局实验
+元数据；(2) held-out 隔离 fail-closed（污染即拒绝写出画像）；(3) provenance 路径去占位符；
+(4) 稳定反序列化 + 校验 + 往返一致性 + hash 复核；(5) control-role 语义显式文档化。
+
+### Implementation
+- `knowledge/profiles/style_profile.py`：
+  - 新增 `ProfileSynthesisError`（fail-closed）与 `ProfileSchemaError`（反序列化校验）。
+  - `synthesize()` 增加 held-out 隔离 fail-closed：`clean=False` 即抛 `ProfileSynthesisError`，
+    **绝不**返回/写出画像；隔离元数据仍保留在 clean 画像内。
+  - `_build_diagnostics` 拆为 `diagnostics.stylometry.author_target`（作者专属）+
+    `validation_metadata`（全局共享）；diagnostic 角色不变。
+  - `_build_strategy_controls` / `_build_provenance` 接收 `author_id`，把
+    `{author_id}` 占位符解析为具体 `austen` / `dickens` 路径（非绝对路径）。
+  - 新增 `AuthorStyleProfile.from_dict` + 嵌套 `GenerationControl/NarrativeControl/
+    StrategyControl.from_dict`（`_require` 校验必填字段；schema_version 不匹配即抛
+    `ProfileSchemaError`）；新增 `verify_reproducibility_hash()`。
+  - control-role 语义显式注释（core/candidate_core/descriptive/experimental/diagnostic
+    对 Phase 6 的激活约定），**不实现 Style Planner**。
+- `knowledge/calibration/synthesize.py`：
+  - 新增纯函数 `_author_targets_from_matrix(X_train, train_authors, train_works,
+    stylometry_version)`：签名只收 TRAIN 侧数据，从类型上杜绝 held-out 参与；计算作者
+    质心（raw 均值）、离散度（raw 标准差）、`mean_within_author_cosine_distance`，产出
+    `full`（落盘载体，954 维质心/离散度）与 `compact`（画像内紧凑标量 + 产物引用）。
+  - `_compute_stylometric_author_targets` 只读 `matrix.npz` 的 `X_train` + `index.json`
+    的 `train_*` 字段，绝不触碰 `X_heldout` / `heldout_*`。
+  - `synthesize_style_profiles` 改为**先全部内存合成，成功后统一落盘**：任一作者
+    fail-closed 则整体不写出任何画像/汇总/报告/目标产物。
+  - 落盘新增 `stylometric_author_targets.json`（`no_held_out=True`、`fit_scope=train_only`）。
+
+### 作者专属文体学目标表示（compact，profile 内）
+`diagnostics.stylometry.author_target`：author_id / n_samples / source_work_ids /
+stylometry_version / feature_dim / fit_scope=train_only / normalization / vectorizer
+provenance / centroid_norm / mean_dispersion / mean_within_author_cosine_distance /
+artifact（引用 `stylometric_author_targets.json`）+ artifact_keys（centroid/dispersion）。
+954 维质心/离散度向量不进入画像 JSON，也不进入人类可读 report（仅落独立产物）。
+
+### 产物（确定性重建结果）
+- Austen：n_samples=833、source_work_ids=[emma, pride_and_prejudice]、centroid_norm=
+  0.098128、within_cosine=0.174174；Dickens：n_samples=1495、source_work_ids=
+  [david_copperfield, great_expectations]、centroid_norm=0.103634、within_cosine=0.155668。
+- 两作者文体学目标**互异**（centroid/within-distance 均不同）；canonical 26 / 36 保持；
+  held-out 隔离 clean=True；画像内无 `{author_id}` 占位符；`verify_reproducibility_hash()`
+  = True。
+
+### Tests
+- **191 passed**（was 182）：新增 9 个 Phase 5.1 测试（diagnostics 拆分、作者目标互异、
+  concrete provenance 无占位符、纯函数 TRAIN-only 目标计算、真实产物 Austen/Dickens 目标
+  互异、往返序列化精确相等、reload 后 hash 复核、错误 schema_version 拒绝、缺字段拒绝）。
+
+### Non-goals（本次明确不做）
+- 未调用任何 LLM / 未重跑 chunk analysis / 未重跑 calibration / 未修改 Phase 4.5 canonical
+  结果 / 未实现 Style Planner / Prompt Compiler / style mixing / 生成 / revision loop。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git
