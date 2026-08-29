@@ -30,13 +30,15 @@ from typing import Any
 from ..analysis.base import AnalysisUnavailable
 from ..config import data_root as default_data_root
 from ..corpus.metadata import author_display_names
-from ..generation.schema import GeneratedPassage
+from ..generation.schema import GeneratedPassage, output_hash
 from ..planning.run import AUTHOR_IDS, _band_thresholds, _load_profile
 from ..planning.schema import StylePlan, WritingRequest
 from ..providers.llm_provider import (
     CacheBackedLLMProvider, DeepSeekProvider, LLMCache, LLMProvider,
 )
-from ..schema.versions import EVALUATION_SCHEMA_VERSION, FEEDBACK_DECISION_SCHEMA_VERSION
+from ..schema.versions import (
+    EVALUATION_SCHEMA_VERSION, FEEDBACK_DECISION_SCHEMA_VERSION, FEEDBACK_LOOP_VERSION,
+)
 from .analyze import measure_actual_profile
 from .compare import compare_target_actual
 from .effect import RevisionEffectAnalyzer
@@ -268,7 +270,8 @@ def decide_feedback_outcome(
             content_integrity=content_integrity, author_id=author_id,
             passage_id=passage_id)
     return _make_decision(
-        FEEDBACK_ROLL_BACK, f"no improvement ({before_n} -> {after_n}); keep the original",
+        FEEDBACK_ROLL_BACK, f"no improvement ({before_n} -> {after_n}); "
+        "keep the pre-revision text (best-so-far)",
         iteration=iteration, max_iterations=max_iterations,
         before_n=before_n, after_n=after_n, lit=lit,
         content_integrity=content_integrity, author_id=author_id,
@@ -291,6 +294,262 @@ def _load_json(path: Path) -> Any:
 def _author_names(author_ids) -> list[str]:
     names = author_display_names()
     return [names[aid] for aid in author_ids if aid in names]
+
+
+# --------------------------------------------------------------------------- #
+# 多轮反馈闭环（Phase 9.1：revise → measure → decide，max_iterations>1 真正迭代）
+# --------------------------------------------------------------------------- #
+def _round_to_summary(r: dict[str, Any]) -> dict[str, Any]:
+    """一轮的紧凑 JSON 摘要（iterations.json / summary 用），绝不内嵌全文 profile 大对象。
+
+    全量 ActualStyleProfile / LiteraryEvaluation 对象由逐轮落盘文件承载
+    （{author}_revised_actual_profile{_iter{N}}.json 等），此处只留 summary。
+    """
+    return {
+        "iteration": r["iteration"],
+        "revision_plan": r["rev_plan"].to_dict(),
+        "revision_result": (r["rev_result"].to_dict()
+                            if isinstance(r["rev_result"], RevisionResult) else None),
+        "revision_effect": r["revision_effect"],
+        "content_integrity": (r["integrity"].to_dict()
+                              if isinstance(r["integrity"], ContentIntegrityResult)
+                              else None),
+        "literary_before": r["literary_before"],
+        "literary_after": r["literary_after"],
+        "comparison_before": r["comparison_before_summary"],
+        "comparison_after": r["comparison_after_summary"],
+        "decision": r["decision"].to_dict(),
+    }
+
+
+def _run_feedback_loop(
+    *,
+    original_text: str,
+    comparison_before: ComparisonResult,
+    lit_before: float | None,
+    plan: StylePlan,
+    profile: Any,
+    request: WritingRequest,
+    author_id: str,
+    passage_id: str,
+    names: list[str],
+    rewriter: RevisionRewriter,
+    checker: ContentIntegrityChecker,
+    evaluator: LiteraryEvaluator,
+    band_thresholds: dict[str, Any],
+    provider: LLMProvider,
+    policy: EvaluationPolicy,
+    max_iterations: int,
+    base: Path,
+) -> dict[str, Any]:
+    """对一位作者跑多轮 revise → measure → decide 闭环（确定性编排，纯函数式编排）。
+
+    每轮：
+        1. 用**当前最佳正文**的偏差 + 文学评价重建改写计划；
+        2. 改写（最小编辑，盲测）；
+        3. Revision Effect 门（当前正文 vs 新改写，非实质 → no_effect 停）；
+        4. Content Integrity 门（改写 vs **不可变原文**，P0 每轮都需保留，绝不
+           对照漂移的中间态）；
+        5. 重测 + 文学评价 + 目标对比；
+        6. decide_feedback_outcome：continue 才前进到下一轮，其余（accept /
+           roll_back / no_effect / no_action）终止。
+
+    铁律：改写器每轮编辑当前最佳正文；完整性每轮对照不可变原文；stylometric 仍只诊断。
+    roll_back 保留当前最佳正文（本轮的 before），绝不回退到原文。
+    返回 rounds（全对象，供落盘）+ iterations（紧凑摘要）+ 最终态字段。
+    """
+    rounds: list[dict[str, Any]] = []
+    current_text = original_text
+    current_comparison = comparison_before
+    current_literary = lit_before
+
+    iteration = 1
+    decision: FeedbackDecision | None = None
+    rev_result: RevisionResult | None = None
+    integrity: ContentIntegrityResult | None = None
+    actual_after: Any = None
+    eval_after: Any = None
+    comparison_after: ComparisonResult | None = None
+    final_outcome: str | None = None
+    final_iteration: int | None = None
+    final_text_hash: str | None = None
+
+    def _record(rev_plan: RevisionPlan, *, effect_dict: dict[str, Any] | None = None,
+                lit_after: float | None = None) -> None:
+        rounds.append({
+            "iteration": iteration,
+            "rev_plan": rev_plan,
+            "rev_result": rev_result,
+            "revision_effect": effect_dict,
+            "integrity": integrity,
+            "literary_before": current_literary,
+            "literary_after": lit_after,
+            "comparison_before_summary": current_comparison.summary,
+            "comparison_after_summary": (comparison_after.summary
+                                         if comparison_after is not None else None),
+            "actual_after": actual_after,
+            "eval_after": eval_after,
+            "decision": decision,
+        })
+
+    while iteration <= max_iterations:
+        rev_plan = build_revision_plan(
+            current_comparison, plan, evaluation=current_literary,
+            weak_score_threshold=policy.weak_score_threshold)
+
+        # STEP 0：空计划 → no_action（未执行任何改写），停。
+        if not rev_plan.revision_items:
+            decision = decide_feedback_outcome(
+                current_comparison, None, iteration=iteration,
+                max_iterations=max_iterations, literary_before=current_literary,
+                literary_after=None, content_integrity=None, no_revision=True,
+                policy=policy, author_id=author_id, passage_id=passage_id)
+            rev_result = None
+            integrity = None
+            actual_after = None
+            eval_after = None
+            comparison_after = None
+            _record(rev_plan)
+            final_outcome, final_iteration = decision.outcome, iteration
+            final_text_hash = output_hash(current_text)
+            break
+
+        # 改写（当前最佳正文）。
+        rev_result = rewriter.rewrite(current_text, rev_plan, author_names=names)
+
+        if isinstance(rev_result, AnalysisUnavailable):
+            decision = decide_feedback_outcome(
+                current_comparison, None, iteration=iteration,
+                max_iterations=max_iterations, literary_before=current_literary,
+                literary_after=None, content_integrity=None, no_revision=False,
+                policy=policy, author_id=author_id, passage_id=passage_id)
+            rev_result = None
+            integrity = None
+            actual_after = None
+            eval_after = None
+            comparison_after = None
+            _record(rev_plan)
+            final_outcome, final_iteration = decision.outcome, iteration
+            final_text_hash = output_hash(current_text)
+            break
+
+        # Gate 0：Revision Effect（当前 vs 新改写，确定性零 token）。
+        effect = RevisionEffectAnalyzer().analyze(current_text, rev_result.revised_text)
+        rev_result.revision_effect = effect.to_dict()
+
+        if not effect.substantive_edit:
+            decision = decide_feedback_outcome(
+                current_comparison, None, iteration=iteration,
+                max_iterations=max_iterations, literary_before=current_literary,
+                literary_after=None, content_integrity=None, no_revision=False,
+                revision_effect=effect, policy=policy, author_id=author_id,
+                passage_id=passage_id)
+            integrity = None
+            actual_after = None
+            eval_after = None
+            comparison_after = None
+            _record(rev_plan, effect_dict=effect.to_dict())
+            final_outcome, final_iteration = decision.outcome, iteration
+            final_text_hash = output_hash(current_text)
+            break
+
+        # Gate 1：Content Integrity（改写 vs 不可变原文，P0 每轮保留）。
+        integrity = checker.check(original_text, rev_result.revised_text, request,
+                                  author_names=names)
+
+        if isinstance(integrity, AnalysisUnavailable):
+            decision = _make_decision(
+                FEEDBACK_ROLL_BACK, "content integrity check unavailable; fail-closed",
+                iteration=iteration, max_iterations=max_iterations,
+                before_n=_count_high_priority_deviations(current_comparison),
+                after_n=None,
+                lit=_literary_quality(current_literary, None, policy,
+                                      guard="unavailable"),
+                content_integrity=None, author_id=author_id, passage_id=passage_id)
+            integrity = None
+            actual_after = None
+            eval_after = None
+            comparison_after = None
+            _record(rev_plan, effect_dict=effect.to_dict())
+            final_outcome, final_iteration = decision.outcome, iteration
+            final_text_hash = output_hash(current_text)
+            break
+
+        if not integrity.passed:
+            decision = decide_feedback_outcome(
+                current_comparison, None, iteration=iteration,
+                max_iterations=max_iterations, literary_before=current_literary,
+                literary_after=None, content_integrity=integrity, no_revision=False,
+                policy=policy, author_id=author_id, passage_id=passage_id)
+            actual_after = None
+            eval_after = None
+            comparison_after = None
+            _record(rev_plan, effect_dict=effect.to_dict())
+            final_outcome, final_iteration = decision.outcome, iteration
+            final_text_hash = output_hash(current_text)
+            break
+
+        # 重测 + 文学评价 + 目标对比（改写后）。
+        rev_passage_id = f"{passage_id}:rev{iteration}"
+        actual_after = measure_actual_profile(
+            rev_result.revised_text, author_id=author_id, passage_id=rev_passage_id,
+            style_plan_id=plan.style_plan_id, profile=profile, provider=provider,
+            data_root_=base)
+        eval_after = _evaluate(evaluator, rev_result.revised_text, author_id,
+                               rev_passage_id)
+        comparison_after = compare_target_actual(
+            plan, profile, actual_after, band_thresholds)
+        lit_after = eval_after.total_score if eval_after else None
+        decision = decide_feedback_outcome(
+            current_comparison, comparison_after, iteration=iteration,
+            max_iterations=max_iterations, literary_before=current_literary,
+            literary_after=lit_after, content_integrity=integrity, no_revision=False,
+            policy=policy, author_id=author_id, passage_id=passage_id)
+
+        _record(rev_plan, effect_dict=effect.to_dict(), lit_after=lit_after)
+
+        if decision.outcome == FEEDBACK_CONTINUE:
+            # 前进：本轮改写成为下一轮的"当前最佳正文"。
+            current_text = rev_result.revised_text
+            current_comparison = comparison_after
+            current_literary = lit_after
+            iteration += 1
+            rev_result = None
+            integrity = None
+            actual_after = None
+            eval_after = None
+            comparison_after = None
+            continue
+
+        final_outcome = decision.outcome
+        final_iteration = iteration
+        if decision.outcome == FEEDBACK_ACCEPT:
+            final_text_hash = output_hash(rev_result.revised_text)
+        else:
+            # roll_back：保留当前最佳正文（本轮的 before），绝不回退到原文。
+            final_text_hash = output_hash(current_text)
+        break
+
+    # 防御性兜底（正常不会走到：continue 仅在 iteration < max_iterations 时返回，
+    # 故循环必然在 accept / roll_back / no_effect / no_action 处 break）。
+    if final_outcome is None:
+        final_outcome = decision.outcome if decision is not None else FEEDBACK_ROLL_BACK
+        final_iteration = iteration
+        final_text_hash = output_hash(current_text)
+
+    return {
+        "rounds": rounds,
+        "iterations": [_round_to_summary(r) for r in rounds],
+        "decision": decision,
+        "rev_result": rev_result,
+        "integrity": integrity,
+        "actual_after": actual_after,
+        "eval_after": eval_after,
+        "comparison_after": comparison_after,
+        "final_outcome": final_outcome,
+        "final_iteration": final_iteration,
+        "final_text_hash": final_text_hash,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -341,151 +600,96 @@ def run_evaluation(data_root_: Path | None = None,
 
         # 4. 目标 vs 实际
         comparison_before = compare_target_actual(plan, profile, actual, band_thresholds)
-
-        # 5. 改写计划
-        rev_plan = build_revision_plan(
-            comparison_before, plan, evaluation=eval_before,
-            weak_score_threshold=policy.weak_score_threshold)
-
         lit_before = eval_before.total_score if eval_before else None
 
-        # 6–8. 改写 → 完整性 gate → 再分析 → 决策
-        if not rev_plan.revision_items:
-            decision = decide_feedback_outcome(
-                comparison_before, None, iteration=1, max_iterations=max_iterations,
-                literary_before=lit_before, literary_after=None,
-                content_integrity=None, no_revision=True, policy=policy,
-                author_id=author_id, passage_id=passage.generation_id)
-            integrity = None
-            rev_result = None
-            actual_after = None
-            eval_after = None
-            comparison_after = None
-        else:
-            rev_result = rewriter.rewrite(
-                passage.generated_text, rev_plan, author_names=names)
-
-            if isinstance(rev_result, AnalysisUnavailable):
-                decision = decide_feedback_outcome(
-                    comparison_before, None, iteration=1, max_iterations=max_iterations,
-                    literary_before=lit_before, literary_after=None,
-                    content_integrity=None, no_revision=False, policy=policy,
-                    author_id=author_id, passage_id=passage.generation_id)
-                integrity = None
-                actual_after = None
-                eval_after = None
-                comparison_after = None
-            else:
-                # Gate 0：Revision Effect（确定性，零 token）——改写是否产生实质词级变化。
-                effect = RevisionEffectAnalyzer().analyze(
-                    passage.generated_text, rev_result.revised_text)
-                rev_result.revision_effect = effect.to_dict()
-
-                if not effect.substantive_edit:
-                    # no_effect：改写无实质变化 → 短路，绝不调 integrity / 重测 /
-                    # 文学评价 / 策略匹配（杜绝 LLM 测量噪声被记为改善；spec §十四）。
-                    decision = decide_feedback_outcome(
-                        comparison_before, None, iteration=1,
-                        max_iterations=max_iterations, literary_before=lit_before,
-                        literary_after=None, content_integrity=None,
-                        no_revision=False, revision_effect=effect, policy=policy,
-                        author_id=author_id, passage_id=passage.generation_id)
-                    integrity = None
-                    actual_after = None
-                    eval_after = None
-                    comparison_after = None
-                else:
-                    # Content Integrity gate（先于风格重测，省 token；spec §十一）
-                    integrity = checker.check(
-                        passage.generated_text, rev_result.revised_text, request,
-                        author_names=names)
-
-                    if isinstance(integrity, AnalysisUnavailable):
-                        decision = _make_decision(
-                            FEEDBACK_ROLL_BACK,
-                            "content integrity check unavailable; fail-closed",
-                            iteration=1, max_iterations=max_iterations,
-                            before_n=_count_high_priority_deviations(comparison_before),
-                            after_n=None,
-                            lit=_literary_quality(lit_before, None, policy,
-                                                  guard="unavailable"),
-                            content_integrity=None, author_id=author_id,
-                            passage_id=passage.generation_id)
-                        integrity = None
-                        actual_after = None
-                        eval_after = None
-                        comparison_after = None
-                    elif not integrity.passed:
-                        decision = decide_feedback_outcome(
-                            comparison_before, None, iteration=1,
-                            max_iterations=max_iterations, literary_before=lit_before,
-                            literary_after=None, content_integrity=integrity,
-                            no_revision=False, policy=policy, author_id=author_id,
-                            passage_id=passage.generation_id)
-                        actual_after = None
-                        eval_after = None
-                        comparison_after = None
-                    else:
-                        rev_passage_id = f"{passage.generation_id}:rev1"
-                        actual_after = measure_actual_profile(
-                            rev_result.revised_text, author_id=author_id,
-                            passage_id=rev_passage_id, style_plan_id=plan.style_plan_id,
-                            profile=profile, provider=provider, data_root_=base)
-                        eval_after = _evaluate(evaluator, rev_result.revised_text,
-                                               author_id, rev_passage_id)
-                        comparison_after = compare_target_actual(
-                            plan, profile, actual_after, band_thresholds)
-                        decision = decide_feedback_outcome(
-                            comparison_before, comparison_after, iteration=1,
-                            max_iterations=max_iterations, literary_before=lit_before,
-                            literary_after=(eval_after.total_score if eval_after else None),
-                            content_integrity=integrity, no_revision=False, policy=policy,
-                            author_id=author_id, passage_id=passage.generation_id)
+        # 5–8. 多轮反馈闭环（Phase 9.1：revise → measure → decide，max_iterations>1
+        # 真正迭代；continue 才前进，其余停）。
+        loop = _run_feedback_loop(
+            original_text=passage.generated_text,
+            comparison_before=comparison_before, lit_before=lit_before,
+            plan=plan, profile=profile, request=request,
+            author_id=author_id, passage_id=passage.generation_id,
+            names=names, rewriter=rewriter, checker=checker, evaluator=evaluator,
+            band_thresholds=band_thresholds, provider=provider, policy=policy,
+            max_iterations=max_iterations, base=base)
+        rounds = loop["rounds"]
+        iterations = loop["iterations"]
 
         # 9. 落盘（run_tag 时写入 evaluation_v3/{author_id}_{run_tag}/ 子目录，物理隔离）
         aout = out_dir / f"{author_id}_{run_tag}" if run_tag else out_dir
         aout.mkdir(parents=True, exist_ok=True)
         _write_json(aout / f"{author_id}_actual_profile.json", actual.to_dict())
-        _write_json(aout / f"{author_id}_revision_plan.json", rev_plan.to_dict())
         if eval_before is not None:
             _write_json(aout / f"{author_id}_literary_evaluation.json",
                         eval_before.to_dict())
-        if isinstance(rev_result, RevisionResult):
-            _write_json(aout / f"{author_id}_revision_result.json",
-                        rev_result.to_dict())
-        if isinstance(integrity, ContentIntegrityResult):
-            _write_json(aout / f"{author_id}_content_integrity.json",
-                        integrity.to_dict())
-        if actual_after is not None:
-            _write_json(aout / f"{author_id}_revised_actual_profile.json",
-                        actual_after.to_dict())
-        if eval_after is not None:
-            _write_json(aout / f"{author_id}_revised_literary_evaluation.json",
-                        eval_after.to_dict())
 
+        # 逐轮落盘：第 1 轮沿用旧文件名（无后缀，向后兼容），第 N≥2 轮加 _iter{N} 后缀。
+        for r in rounds:
+            n = r["iteration"]
+            suffix = "" if n == 1 else f"_iter{n}"
+            _write_json(aout / f"{author_id}_revision_plan{suffix}.json",
+                        r["rev_plan"].to_dict())
+            if isinstance(r["rev_result"], RevisionResult):
+                _write_json(aout / f"{author_id}_revision_result{suffix}.json",
+                            r["rev_result"].to_dict())
+            if isinstance(r["integrity"], ContentIntegrityResult):
+                _write_json(aout / f"{author_id}_content_integrity{suffix}.json",
+                            r["integrity"].to_dict())
+            if r["actual_after"] is not None:
+                _write_json(aout / f"{author_id}_revised_actual_profile{suffix}.json",
+                            r["actual_after"].to_dict())
+            if r["eval_after"] is not None:
+                _write_json(aout / f"{author_id}_revised_literary_evaluation{suffix}.json",
+                            r["eval_after"].to_dict())
+
+        # 多轮历史 + 最终态（机器可读）。
+        _write_json(aout / f"{author_id}_iterations.json", {
+            "loop_version": FEEDBACK_LOOP_VERSION,
+            "author_id": author_id,
+            "generation_id": passage.generation_id,
+            "max_iterations": max_iterations,
+            "final_outcome": loop["final_outcome"],
+            "final_iteration": loop["final_iteration"],
+            "final_text_hash": loop["final_text_hash"],
+            "n_iterations": len(iterations),
+            "iterations": iterations,
+        })
+
+        first_plan_d = rounds[0]["rev_plan"].to_dict()
+        last = loop
         authors[author_id] = {
             "generation_id": passage.generation_id,
             "style_plan_id": plan.style_plan_id,
             "comparison_before": comparison_before.summary,
             "literary_total_before": lit_before,
-            "n_revision_items": len(rev_plan.revision_items),
-            "revision_items_by_priority": rev_plan.metadata.get("by_priority"),
-            "revision_items": [i.to_dict() for i in rev_plan.revision_items],
-            "claimed_change_descriptions": (rev_result.claimed_change_descriptions
-                                            if isinstance(rev_result, RevisionResult)
-                                            else []),
-            "revision_effect": (rev_result.revision_effect
-                                if isinstance(rev_result, RevisionResult) else None),
-            "comparison_after": (comparison_after.summary
-                                 if comparison_after is not None else None),
-            "literary_total_after": (eval_after.total_score if eval_after else None),
+            "n_revision_items": len(first_plan_d["revision_items"]),
+            "revision_items_by_priority": first_plan_d["metadata"].get("by_priority"),
+            "revision_items": first_plan_d["revision_items"],
+            "claimed_change_descriptions": (
+                last["rev_result"].claimed_change_descriptions
+                if isinstance(last["rev_result"], RevisionResult) else []),
+            "revision_effect": (
+                last["rev_result"].revision_effect
+                if isinstance(last["rev_result"], RevisionResult) else None),
+            "comparison_after": (
+                last["comparison_after"].summary
+                if last["comparison_after"] is not None else None),
+            "literary_total_after": (
+                last["eval_after"].total_score if last["eval_after"] else None),
             "stylometric_before": actual.layer_d_stylometric,
-            "stylometric_after": (actual_after.layer_d_stylometric
-                                  if actual_after is not None else None),
-            "content_integrity": (integrity.to_dict()
-                                  if isinstance(integrity, ContentIntegrityResult)
-                                  else None),
-            "decision": decision.to_dict(),
+            "stylometric_after": (
+                last["actual_after"].layer_d_stylometric
+                if last["actual_after"] is not None else None),
+            "content_integrity": (
+                last["integrity"].to_dict()
+                if isinstance(last["integrity"], ContentIntegrityResult) else None),
+            "decision": last["decision"].to_dict(),
+            # Phase 9.1 多轮闭环新增字段（单轮运行时同样填充，n_iterations=1）。
+            "iterations": iterations,
+            "final_outcome": loop["final_outcome"],
+            "final_iteration": loop["final_iteration"],
+            "final_text_hash": loop["final_text_hash"],
+            "n_iterations": len(iterations),
         }
 
     summary = _build_summary(provider, policy, authors,
@@ -533,6 +737,7 @@ def _build_summary(provider: LLMProvider, policy: EvaluationPolicy,
         "run_tag": run_tag,
         "schema_version": EVALUATION_SCHEMA_VERSION,
         "decision_schema_version": FEEDBACK_DECISION_SCHEMA_VERSION,
+        "loop_version": FEEDBACK_LOOP_VERSION,
         "max_iterations": max_iterations,
         "evaluation_policy": policy.to_dict(),
         "provider": getattr(provider, "provider_id", ""),
@@ -550,15 +755,17 @@ def _build_summary(provider: LLMProvider, policy: EvaluationPolicy,
 # --------------------------------------------------------------------------- #
 def _render_report(summary: dict[str, Any], authors: dict[str, Any]) -> str:
     lines = [
-        "# Weaver Style Engine — Style Feedback Loop + 文学评价报告（Phase 8.2）",
+        "# Weaver Style Engine — Style Feedback Loop + 文学评价报告（Phase 8.2 / 9.1）",
         "",
         f"- provider / model：`{summary.get('provider')}` / `{summary.get('model')}`",
-        f"- blind：`{summary.get('blind')}`　max_iterations：`{summary.get('max_iterations')}`",
+        f"- blind：`{summary.get('blind')}`　max_iterations：`{summary.get('max_iterations')}`"
+        f"　loop_version：`{summary.get('loop_version')}`",
         f"- evaluation policy：`{json.dumps(summary.get('evaluation_policy'), ensure_ascii=False)}`",
         "",
         "决策为四阶 gate：Revision Effect（确定性零 token）→ Content Integrity（最高）→ "
         "Literary Quality guard → Style Fidelity。Style 与 Literary **分别报告**，绝不"
-        "合并成单一加权分；stylometric 距离仅诊断；no_effect 独立于 no_action 与 roll_back。",
+        "合并成单一加权分；stylometric 距离仅诊断；no_effect 独立于 no_action 与 roll_back。"
+        "Phase 9.1：continue 真正迭代到下一轮，roll_back 保留当前最佳正文（best-so-far）。",
         "",
     ]
     for author_id in AUTHOR_IDS:
@@ -612,7 +819,7 @@ def _render_report(summary: dict[str, Any], authors: dict[str, Any]) -> str:
                 lines.append(f"  - [{v['severity']}] {v['kind']}: {v['description']}")
         lines += [
             "",
-            "### 决策（三阶 gate）",
+            "### 决策（四阶 gate）",
             "",
             f"```json\n{json.dumps(d, ensure_ascii=False, indent=2)}\n```",
             "",
@@ -622,6 +829,23 @@ def _render_report(summary: dict[str, Any], authors: dict[str, Any]) -> str:
             f"- **决策**：`{d['outcome']}` — {d['reason']}",
             "",
         ]
+        if a.get("n_iterations", 1) > 1:
+            lines += ["### 多轮迭代历史（Phase 9.1）", ""]
+            for it in a["iterations"]:
+                d_i = it["decision"]
+                sf = d_i["style_fidelity"]
+                lines.append(
+                    f"- 第 `{it['iteration']}` 轮：偏差 "
+                    f"{sf['high_priority_deviations_before']} → "
+                    f"{sf['high_priority_deviations_after']}，"
+                    f"文学 `{it['literary_before']}` → `{it['literary_after']}`，"
+                    f"outcome=`{d_i['outcome']}`")
+            lines += [
+                "",
+                f"- **最终**：`{a['final_outcome']}`（第 `{a['final_iteration']}` 轮，"
+                f"共 `{a['n_iterations']}` 轮，final_text_hash=`{a['final_text_hash']}`）",
+                "",
+            ]
     lines += [
         "---",
         "",
@@ -648,12 +872,14 @@ def main() -> None:
               f"style_dev={sf['high_priority_deviations_before']}->"
               f"{sf['high_priority_deviations_after']} "
               f"lit_drop={lq['drop']} integrity={d['content_integrity_passed']} "
-              f"outcome={d['outcome']}")
+              f"outcome={d['outcome']} "
+              f"n_iters={a['n_iterations']} final={a['final_outcome']}"
+              f"@{a['final_iteration']}")
     print(f"token_usage: {summary['token_usage']}")
     print("artifacts: data/analysis/evaluation_v3/evaluation_summary.json + "
           "evaluation_report.md + {author_id}_{actual_profile,literary_evaluation,"
           "revision_plan,revision_result,content_integrity,revised_actual_profile,"
-          "revised_literary_evaluation}.json")
+          "revised_literary_evaluation,iterations}.json")
 
 
 if __name__ == "__main__":

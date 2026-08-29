@@ -75,3 +75,10 @@ REVISION_EFFECT_SCHEMA_VERSION = "0.1.0"
 REVISION_EFFECT_ANALYZER_VERSION = "0.1.0"
 REVISION_REWRITER_VERSION = "0.2.0"
 FEEDBACK_DECISION_SCHEMA_VERSION = "0.2.0"
+
+# Phase 9.1：多轮反馈闭环（max_iterations>1 真正迭代 revise→measure→decide）。
+# 只改 run_evaluation 编排与 summary/iterations 产物的**新增**字段，不改任何既有
+# dataclass schema（ActualStyleProfile / RevisionPlan / RevisionResult /
+# FeedbackDecision 均不变），故绝不 bump 上述版本以免错误失效缓存；独立版本仅记录
+# 循环实现版本，写入 summary 与 {author}_iterations.json 作溯源。
+FEEDBACK_LOOP_VERSION = "0.1.0"

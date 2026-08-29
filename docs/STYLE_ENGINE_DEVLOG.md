@@ -1443,6 +1443,68 @@ austen_02 / dickens_02（experiment_id=`phase8_2-generation-v0.1`，fresh，绝�
 
 ---
 
+## Checkpoint — Phase 9.1: Multi-Round Feedback Loop（确定性实现，零真实 LLM）
+
+### Goal
+
+Phase 8.2 的 `run_evaluation` 是单次 if/else 决策：`decide_feedback_outcome` 已返回
+`continue`（"improved, another iteration possible"），但没有任何代码迭代它；因此 Phase 8.2
+只能 `max_iterations=1`。本增量让 `continue` 真正闭环：把 revise → measure → decide 包进
+有界循环，使 `max_iterations>1` 产生真正的多轮精炼，直到停止条件。按用户决定本轮**确定性
+实现**：代码 + 测试 + 文档 + 确定性校验，**绝不调用真实 LLM**，跑完即停等 review。
+
+### 闭环语义（每作者）
+
+- 状态：`current_text`（本轮工作正文）/ `current_comparison`（本轮 before）/
+  `current_literary`（本轮 before 文学分）/ `original_text`（不可变原文，仅供完整性对照）。
+- 每轮：`build_revision_plan(当前偏差)` → `rewrite(当前正文)` → Revision Effect 门（当前
+  vs 新）→ Content Integrity 门（新 vs **不可变原文**）→ 重测 + 文学 + 目标对比 →
+  `decide_feedback_outcome`。`continue` 才前进（`current_text=改写`、`current_comparison=after`、
+  `iteration+=1`），其余（accept/roll_back/no_effect/no_action）停。
+- **每轮 delta**：第 N 轮 before = 第 N−1 轮接受的改写（爬坡当前最佳，不重改原文）。
+- **roll_back 保留 best-so-far**：第 N 轮 before 即当前最佳；绝不回退原文。no-improvement
+  理由串改为 "keep the pre-revision text (best-so-far)"。
+
+### 铁律（测试强制断言）
+
+- 改写器每轮编辑当前最佳正文（`_ScriptedRewriter.originals` 断言逐轮 before）。
+- 内容完整性每轮对照**不可变原文**（recording checker 捕获 `check(original, …)` 首参恒为原文）。
+- Revision Effect 每轮对照当前正文：中途 no-op（第 2 轮改 == 第 1 轮改）→ `no_effect` 停。
+- 盲测 / P0 / stylometric-only 诊断：循环不改任何 prompt 或 analyzer 代码，全部保持。
+
+### 产物 / 溯源
+
+- 第 1 轮沿用旧文件名（无后缀，向后兼容），第 N≥2 轮 `_iter{N}` 后缀
+  （`revision_result_iter2.json` 等）。
+- 新增 `{author}_iterations.json`：`loop_version` + `max_iterations` + `final_outcome` /
+  `final_iteration` / `final_text_hash` / `n_iterations` + 逐轮紧凑 `iterations`（不含全文
+  profile 大对象，全量由逐轮 `revised_actual_profile{_iter{N}}.json` 承载）。
+- summary 新增 `loop_version` + 每作者 `iterations`/`final_*`（单轮同样填充，n_iterations=1）。
+- `knowledge/schema/versions.py` 新增 `FEEDBACK_LOOP_VERSION = "0.1.0"`（独立版本，绝不 bump
+  `EVALUATION_SCHEMA_VERSION` 等任何 cache 相关版本）。
+
+### Implementation
+
+- `knowledge/evaluation/run.py`：新增 `_run_feedback_loop(...)`（返回 rounds 全对象 +
+  iterations 紧凑摘要 + 最终态）与 `_round_to_summary(...)`；`run_evaluation` 用循环结果逐轮
+  落盘 + 写 `iterations.json` + 扩展 summary；`_render_report`/`main` 增列多轮历史；
+  `decide_feedback_outcome` 的 no-improvement 理由串改为 best-so-far。
+- `tests/test_feedback_loop.py`（新增，7 tests，零 token）：continue→accept、回归回滚
+  best-so-far、max_iterations 界、中途 no_effect、完整性每轮对照原文、单轮向后兼容、
+  iterations.json + loop_version。
+
+### Tests
+
+- **368 passed**（361 既有 + 7 新多轮）。全部确定性、Dummy/fake、零 token、零真实 LLM。
+
+### Non-goals（本次明确不做，Phase 9 其余两工作流待后续）
+
+- 段级 stylometric 漂移定位（spec §15.4，真段级编辑定位）——仍整段最小编辑。
+- §19.5 生成可控性实验（low/medium/high 重生成）。
+- 任何真实 LLM 的 Phase 9 运行——待 review 后明确批准。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

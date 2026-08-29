@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 8.2 (Revision Effect & Measurement Validity) — COMPLETE（确定性，未运行真实 LLM）：新增 Gate 0 改写有效性门（`RevisionEffectAnalyzer`，零 token）+ `no_effect` 语义 + 自报字段降级 `claimed_*`；356 tests |
-| **Last completed checkpoint** | Phase 8.2 实现 + 确定性 dry-run：Austen 改写 `punctuation_only` / Dickens `identical` → 均 **no_effect**（短路后续昂贵步骤，杜绝 LLM 测量噪声被记为改善）；Phase 8.1 Post-Run Audit 结论 NEEDS_FIX 的缺陷已修；产物隔离到未来 `evaluation_v3/`，v1/v2 未动；356 tests |
+| **Current phase** | Phase 9.1 (Multi-Round Feedback Loop) — COMPLETE（确定性实现，未运行真实 LLM）：`run_evaluation` 从单次决策重构为有界多轮闭环，`continue` 真正迭代 revise→measure→decide，`roll_back` 保留 best-so-far；368 tests |
+| **Last completed checkpoint** | Phase 9.1 确定性实现：多轮反馈闭环 + 逐轮 `_iter{N}` 产物 + `{author}_iterations.json` + `FEEDBACK_LOOP_VERSION`；7 个新多轮测试（continue→accept / 回归回滚 best-so-far / max_iterations 界 / 中途 no_effect / 完整性每轮对照原文），零真实 LLM；368 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -346,7 +346,20 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 成本：generation 3,346 + evaluation 79,419 = **82,765 token**（48 real requests，0 hit）。
 - Tests：**361 passed**（+5）。
 
+## Phase 9.1 (Multi-Round Feedback Loop) — COMPLETE（确定性实现，未运行真实 LLM）
+- 把 `run_evaluation` 的单次 if/else 决策重构为有界 `while` 闭环：`continue` 真正迭代
+  revise → measure → decide；`decide_feedback_outcome` 纯函数不变（仍编码全部停止条件）。
+- 每轮 delta 语义：第 N 轮 "before" = 第 N−1 轮接受的改写（爬坡当前最佳，不重改原文）；
+  `roll_back` 保留 best-so-far（第 N 轮 before），绝不回退原文。
+- 铁律：改写器每轮编辑当前最佳正文；内容完整性每轮对照**不可变原文**（P0 每轮保留）；
+  Revision Effect 每轮对照当前正文（中途 no-op → no_effect 停）；stylometric 仍仅诊断。
+- 产物：第 1 轮沿用旧文件名（向后兼容），第 N≥2 轮 `_iter{N}` 后缀；新增
+  `{author}_iterations.json`（loop_version + 逐轮 history + final_*）；summary 新增
+  `iterations`/`final_outcome`/`final_iteration`/`final_text_hash`/`n_iterations`（单轮同样填充）。
+- 新增 `FEEDBACK_LOOP_VERSION=0.1.0`（独立版本，绝不 bump 任何 cache 相关版本）。
+- Tests：**368 passed**（+7 多轮确定性，零 token，零真实 LLM）。
+
 ## Next planned action
-- **STOP，报告 18 项（§二十四），等待人工 review 决定是否进入 Phase 9**（多轮反馈、
-  段级 stylometric 漂移定位、§19.5 生成可控性实验）。Phase 8.2 真实验证已跑完，不自动进入
-  Phase 9、不合并 main、不提 PR。
+- **STOP，报告，等待人工 review**：多轮反馈闭环（Phase 9.1）确定性实现已跑完（368 tests，
+  零真实 LLM）。剩余两个 Phase 9 工作流（段级 stylometric 漂移定位 §15.4、§19.5 生成可控性
+  实验）待后续；绝不自动进入真实 LLM 运行、不合并 main、不提 PR。
