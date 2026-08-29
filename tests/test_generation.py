@@ -22,9 +22,9 @@ import pytest
 
 from knowledge.generation.provider import DummyGenerationProvider, GenerationProvider
 from knowledge.generation.run import (
-    EXPERIMENT_ID, GENERATION_PARAMETERS, _author_names_for, _band_thresholds,
-    _build_passage, _plan_and_prompt, _render_passage_md, _require_valid_plumbing,
-    run_generation,
+    EXPERIMENT_ID, EXPERIMENT_ID_82, GENERATION_PARAMETERS, _author_names_for,
+    _band_thresholds, _build_passage, _plan_and_prompt, _render_passage_md,
+    _require_valid_plumbing, run_generation,
 )
 from knowledge.generation.schema import (
     IMITATION_INSTRUCTION_TOKENS, GeneratedPassage, GenerationError,
@@ -494,3 +494,39 @@ def test_passage_md_contains_resolved_metadata_no_placeholders():
     # 不得残留任何未解析的 `{p.` 占位符。
     assert "{p." not in md
     assert "{p.experiment_id}" not in md and "{p.generation_id}" not in md
+
+
+# --------------------------------------------------------------------------- #
+# 实验身份（Phase 8.2：独立 experiment_id → generation/{id}/ 子目录，绝不覆盖 Phase 7）
+# --------------------------------------------------------------------------- #
+def test_run_generation_custom_experiment_id_writes_subdir(tmp_path, monkeypatch):
+    _patch_run_env(monkeypatch)
+    # 合法 plumbing 在默认根目录（一次性传输验证，同 provider/model/params 复用，
+    # 不随新实验重发）。
+    default_out = tmp_path / "analysis" / "generation"
+    default_out.mkdir(parents=True, exist_ok=True)
+    (default_out / "generation_plumbing.json").write_text(
+        json.dumps(_valid_plumbing(), ensure_ascii=False), encoding="utf-8")
+
+    summary = run_generation(
+        data_root_=tmp_path,
+        provider=DummyGenerationProvider(
+            content="A fresh passage for experiment two.", finish_reason="stop"),
+        experiment_id=EXPERIMENT_ID_82)
+
+    sub = default_out / EXPERIMENT_ID_82
+    # 新产物写进子目录。
+    for name in ("austen_generation.json", "dickens_generation.json",
+                 "generation_experiment.json", "generation_summary.json",
+                 "austen_passage.md", "dickens_passage.md",
+                 "generation_comparison_report.md"):
+        assert (sub / name).exists(), f"missing artifact: {name}"
+    # 默认根目录只有 plumbing（Phase 7 产物未被触碰）。
+    assert not (default_out / "generation_experiment.json").exists()
+
+    # experiment_id 已写入 summary 与正文产物。
+    assert summary["experiment_id"] == EXPERIMENT_ID_82
+    austen = json.loads((sub / "austen_generation.json").read_text(encoding="utf-8"))
+    assert austen["experiment_id"] == EXPERIMENT_ID_82
+    assert austen["fresh_request"] is True
+    assert austen["cache_hit"] is False

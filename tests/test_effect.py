@@ -343,7 +343,8 @@ def _install_fakes(monkeypatch, tmp_path, *, revised_text):
                          "constraints": []})
 
     monkeypatch.setattr(run_mod, "_load_profile", lambda base, aid: profile)
-    monkeypatch.setattr(run_mod, "_load_passage", lambda base, aid: passage)
+    monkeypatch.setattr(run_mod, "_load_passage",
+                        lambda base, aid, gen_exp=None: passage)
     monkeypatch.setattr(run_mod, "_load_plan", lambda base, aid: plan)
     monkeypatch.setattr(run_mod, "_band_thresholds", lambda base, ids: {})
 
@@ -416,3 +417,78 @@ def test_run_substantive_edit_proceeds_through_integrity(monkeypatch, tmp_path):
     assert decision["style_comparison_performed"] is True
     assert fake_checker.calls == 1          # 完整性检查器被调用
     assert measure_calls["n"] == 2          # before + after 各 1 次
+
+
+# --------------------------------------------------------------------------- #
+# 实验身份 / 布局（spec §二十一：evaluation_v3/{author}_02/，绝不覆盖旧产物）
+# --------------------------------------------------------------------------- #
+def _write_generation_json(base, author_id, experiment_id=None):
+    from knowledge.generation.schema import GeneratedPassage, GenerationUsage
+    gen_root = base / "analysis" / "generation"
+    if experiment_id:
+        gen_root = gen_root / experiment_id
+    gen_root.mkdir(parents=True, exist_ok=True)
+    p = GeneratedPassage(
+        generation_id="gid", generation_condition_id="cid",
+        schema_version="0.1.0", author_id=author_id, style_plan_id="spid",
+        source_profile_hash="h" * 64, writing_request={},
+        provider="deepseek", model="deepseek-chat",
+        generation_parameters={"temperature": 0.8, "top_p": 0.9, "max_tokens": 2048},
+        compiled_prompt_hash="c" * 64, compiled_prompt="prompt",
+        generated_text="A fresh passage.", finish_reason="stop",
+        usage=GenerationUsage(10, 20, 30), generation_version="0.1.0",
+        cache_hit=False, n_retries=0, experiment_id=experiment_id or "",
+        fresh_request=True)
+    (gen_root / f"{author_id}_generation.json").write_text(
+        json.dumps(p.to_dict(), ensure_ascii=False), encoding="utf-8")
+
+
+def test_load_passage_reads_custom_generation_subdir(tmp_path):
+    _write_generation_json(tmp_path, "austen", experiment_id="phase8_2-generation-v0.1")
+    passage = run_mod._load_passage(tmp_path, "austen", "phase8_2-generation-v0.1")
+    assert passage.experiment_id == "phase8_2-generation-v0.1"
+    assert passage.generated_text == "A fresh passage."
+    # 默认（None）读扁平目录；自定义子目录不命中 → fail-closed。
+    with pytest.raises(run_mod.EvalError):
+        run_mod._load_passage(tmp_path, "austen")
+
+
+def test_run_evaluation_writes_run_tag_subdir(monkeypatch, tmp_path):
+    fake_checker, fake_evaluator, measure_calls, provider = _install_fakes(
+        monkeypatch, tmp_path, revised_text=REVISED_STRAIGHT)
+    summary = run_mod.run_evaluation(
+        data_root_=tmp_path, provider=provider,
+        generation_experiment_id="phase8_2-generation-v0.1",
+        run_tag="02", summary_prefix="phase8_2_real_validation")
+
+    root = tmp_path / "analysis" / "evaluation_v3"
+    sub = root / "austen_02"
+    assert (sub / "austen_actual_profile.json").exists()
+    assert (sub / "austen_revision_plan.json").exists()
+    assert (sub / "austen_revision_result.json").exists()
+    assert (root / "phase8_2_real_validation_summary.json").exists()
+    assert (root / "phase8_2_real_validation_report.md").exists()
+    # 绝不写入扁平旧布局。
+    assert not (root / "austen_actual_profile.json").exists()
+    # summary 记录实验身份 + run_tag。
+    assert summary["generation_experiment_id"] == "phase8_2-generation-v0.1"
+    assert summary["run_tag"] == "02"
+
+
+def test_run_evaluation_default_flat_layout_unchanged(monkeypatch, tmp_path):
+    fake_checker, fake_evaluator, measure_calls, provider = _install_fakes(
+        monkeypatch, tmp_path, revised_text=REVISED_STRAIGHT)
+    run_mod.run_evaluation(data_root_=tmp_path, provider=provider)
+    root = tmp_path / "analysis" / "evaluation_v3"
+    assert (root / "austen_actual_profile.json").exists()
+    assert (root / "evaluation_summary.json").exists()
+    assert (root / "evaluation_report.md").exists()
+
+
+def test_run_evaluation_threads_max_iterations(monkeypatch, tmp_path):
+    # spec §二十：Phase 8.2 单轮改写必须用 max_iterations=1（改善 → accept，而非 continue）。
+    fake_checker, fake_evaluator, measure_calls, provider = _install_fakes(
+        monkeypatch, tmp_path, revised_text=REVISED_STRAIGHT)
+    summary = run_mod.run_evaluation(
+        data_root_=tmp_path, provider=provider, max_iterations=1)
+    assert summary["max_iterations"] == 1

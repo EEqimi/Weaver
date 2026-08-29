@@ -334,7 +334,19 @@ Short current-state snapshot (≈1–2 min read). History lives in
   `identical` → no_effect。
 - Tests：**356 passed**（+24 确定性回归，含 `run_evaluation` Gate 0 短路断言 provider 0 调用）。
 
+## Phase 8.2 Real End-to-End Validation — COMPLETE（真实 deepseek-chat）
+- 全新生成 austen_02 / dickens_02（experiment_id=`phase8_2-generation-v0.1`，fresh，不读
+  Phase 7 缓存，不覆盖 `generation/` / `evaluation/` / `evaluation_v2/`）。
+- 实验身份参数化：`run_generation(experiment_id)` 写 `generation/{id}/`；`run_evaluation(
+  generation_experiment_id, run_tag, summary_prefix, max_iterations)` 写 `evaluation_v3/
+  {author}_02/`。新增 `knowledge/evaluation/phase8_2.py` runner；`max_iterations=1`（§二十 单轮）。
+- 结果：austen_02 实质改写（6 项/20 词）→ 文学 +0.35、风格 6→6 无改善 → **roll_back**；
+  dickens_02 实质改写（11 项/17 词）→ 文学 +0.2、风格 11→8 改善 → **accept**。两位作者均
+  实质改写（修正 Phase 8.1 的"自报实质/实际 no-op"幻觉）。
+- 成本：generation 3,346 + evaluation 79,419 = **82,765 token**（48 real requests，0 hit）。
+- Tests：**361 passed**（+5）。
+
 ## Next planned action
-- **STOP，等待人工 review**。本轮不运行真实 LLM、不进入 Phase 9。人工确认 Phase 8.2
-  实现后，再决定是否在 `evaluation_v3/` 命名空间下真实运行 Phase 8.2。之后才是 Phase 9
-  （多轮反馈、段级 stylometric 漂移定位、§19.5 生成可控性实验）。
+- **STOP，报告 18 项（§二十四），等待人工 review 决定是否进入 Phase 9**（多轮反馈、
+  段级 stylometric 漂移定位、§19.5 生成可控性实验）。Phase 8.2 真实验证已跑完，不自动进入
+  Phase 9、不合并 main、不提 PR。

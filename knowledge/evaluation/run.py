@@ -298,7 +298,11 @@ def _author_names(author_ids) -> list[str]:
 # --------------------------------------------------------------------------- #
 def run_evaluation(data_root_: Path | None = None,
                    provider: LLMProvider | None = None,
-                   policy: EvaluationPolicy | None = None) -> dict[str, Any]:
+                   policy: EvaluationPolicy | None = None,
+                   generation_experiment_id: str | None = None,
+                   run_tag: str | None = None,
+                   summary_prefix: str = "evaluation",
+                   max_iterations: int = MAX_ITERATIONS) -> dict[str, Any]:
     base = Path(data_root_) if data_root_ is not None else default_data_root()
     out_dir = evaluation_layout(base)["root"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -320,7 +324,7 @@ def run_evaluation(data_root_: Path | None = None,
 
     authors: dict[str, Any] = {}
     for author_id in AUTHOR_IDS:
-        passage = _load_passage(base, author_id)
+        passage = _load_passage(base, author_id, generation_experiment_id)
         plan = _load_plan(base, author_id)
         profile = profiles[author_id]
         request = WritingRequest.from_dict(plan.writing_request)
@@ -348,7 +352,7 @@ def run_evaluation(data_root_: Path | None = None,
         # 6–8. 改写 → 完整性 gate → 再分析 → 决策
         if not rev_plan.revision_items:
             decision = decide_feedback_outcome(
-                comparison_before, None, iteration=1, max_iterations=MAX_ITERATIONS,
+                comparison_before, None, iteration=1, max_iterations=max_iterations,
                 literary_before=lit_before, literary_after=None,
                 content_integrity=None, no_revision=True, policy=policy,
                 author_id=author_id, passage_id=passage.generation_id)
@@ -363,7 +367,7 @@ def run_evaluation(data_root_: Path | None = None,
 
             if isinstance(rev_result, AnalysisUnavailable):
                 decision = decide_feedback_outcome(
-                    comparison_before, None, iteration=1, max_iterations=MAX_ITERATIONS,
+                    comparison_before, None, iteration=1, max_iterations=max_iterations,
                     literary_before=lit_before, literary_after=None,
                     content_integrity=None, no_revision=False, policy=policy,
                     author_id=author_id, passage_id=passage.generation_id)
@@ -382,7 +386,7 @@ def run_evaluation(data_root_: Path | None = None,
                     # 文学评价 / 策略匹配（杜绝 LLM 测量噪声被记为改善；spec §十四）。
                     decision = decide_feedback_outcome(
                         comparison_before, None, iteration=1,
-                        max_iterations=MAX_ITERATIONS, literary_before=lit_before,
+                        max_iterations=max_iterations, literary_before=lit_before,
                         literary_after=None, content_integrity=None,
                         no_revision=False, revision_effect=effect, policy=policy,
                         author_id=author_id, passage_id=passage.generation_id)
@@ -400,7 +404,7 @@ def run_evaluation(data_root_: Path | None = None,
                         decision = _make_decision(
                             FEEDBACK_ROLL_BACK,
                             "content integrity check unavailable; fail-closed",
-                            iteration=1, max_iterations=MAX_ITERATIONS,
+                            iteration=1, max_iterations=max_iterations,
                             before_n=_count_high_priority_deviations(comparison_before),
                             after_n=None,
                             lit=_literary_quality(lit_before, None, policy,
@@ -414,7 +418,7 @@ def run_evaluation(data_root_: Path | None = None,
                     elif not integrity.passed:
                         decision = decide_feedback_outcome(
                             comparison_before, None, iteration=1,
-                            max_iterations=MAX_ITERATIONS, literary_before=lit_before,
+                            max_iterations=max_iterations, literary_before=lit_before,
                             literary_after=None, content_integrity=integrity,
                             no_revision=False, policy=policy, author_id=author_id,
                             passage_id=passage.generation_id)
@@ -433,28 +437,30 @@ def run_evaluation(data_root_: Path | None = None,
                             plan, profile, actual_after, band_thresholds)
                         decision = decide_feedback_outcome(
                             comparison_before, comparison_after, iteration=1,
-                            max_iterations=MAX_ITERATIONS, literary_before=lit_before,
+                            max_iterations=max_iterations, literary_before=lit_before,
                             literary_after=(eval_after.total_score if eval_after else None),
                             content_integrity=integrity, no_revision=False, policy=policy,
                             author_id=author_id, passage_id=passage.generation_id)
 
-        # 9. 落盘
-        _write_json(out_dir / f"{author_id}_actual_profile.json", actual.to_dict())
-        _write_json(out_dir / f"{author_id}_revision_plan.json", rev_plan.to_dict())
+        # 9. 落盘（run_tag 时写入 evaluation_v3/{author_id}_{run_tag}/ 子目录，物理隔离）
+        aout = out_dir / f"{author_id}_{run_tag}" if run_tag else out_dir
+        aout.mkdir(parents=True, exist_ok=True)
+        _write_json(aout / f"{author_id}_actual_profile.json", actual.to_dict())
+        _write_json(aout / f"{author_id}_revision_plan.json", rev_plan.to_dict())
         if eval_before is not None:
-            _write_json(out_dir / f"{author_id}_literary_evaluation.json",
+            _write_json(aout / f"{author_id}_literary_evaluation.json",
                         eval_before.to_dict())
         if isinstance(rev_result, RevisionResult):
-            _write_json(out_dir / f"{author_id}_revision_result.json",
+            _write_json(aout / f"{author_id}_revision_result.json",
                         rev_result.to_dict())
         if isinstance(integrity, ContentIntegrityResult):
-            _write_json(out_dir / f"{author_id}_content_integrity.json",
+            _write_json(aout / f"{author_id}_content_integrity.json",
                         integrity.to_dict())
         if actual_after is not None:
-            _write_json(out_dir / f"{author_id}_revised_actual_profile.json",
+            _write_json(aout / f"{author_id}_revised_actual_profile.json",
                         actual_after.to_dict())
         if eval_after is not None:
-            _write_json(out_dir / f"{author_id}_revised_literary_evaluation.json",
+            _write_json(aout / f"{author_id}_revised_literary_evaluation.json",
                         eval_after.to_dict())
 
         authors[author_id] = {
@@ -482,15 +488,20 @@ def run_evaluation(data_root_: Path | None = None,
             "decision": decision.to_dict(),
         }
 
-    summary = _build_summary(provider, policy, authors)
-    _write_json(out_dir / "evaluation_summary.json", summary)
-    (out_dir / "evaluation_report.md").write_text(
+    summary = _build_summary(provider, policy, authors,
+                             generation_experiment_id, run_tag, max_iterations)
+    _write_json(out_dir / f"{summary_prefix}_summary.json", summary)
+    (out_dir / f"{summary_prefix}_report.md").write_text(
         _render_report(summary, authors), encoding="utf-8")
     return summary
 
 
-def _load_passage(base: Path, author_id: str) -> GeneratedPassage:
-    path = base / "analysis" / "generation" / f"{author_id}_generation.json"
+def _load_passage(base: Path, author_id: str,
+                  generation_experiment_id: str | None = None) -> GeneratedPassage:
+    gen_root = base / "analysis" / "generation"
+    if generation_experiment_id:
+        gen_root = gen_root / generation_experiment_id
+    path = gen_root / f"{author_id}_generation.json"
     if not path.exists():
         raise EvalError(f"缺 Phase 7 生成产物: {path}")
     return GeneratedPassage.from_dict(_load_json(path))
@@ -510,14 +521,19 @@ def _evaluate(evaluator: LiteraryEvaluator, text: str, author_id: str,
 
 
 def _build_summary(provider: LLMProvider, policy: EvaluationPolicy,
-                   authors: dict[str, Any]) -> dict[str, Any]:
+                   authors: dict[str, Any],
+                   generation_experiment_id: str | None = None,
+                   run_tag: str | None = None,
+                   max_iterations: int = MAX_ITERATIONS) -> dict[str, Any]:
     inner = getattr(provider, "_inner", None)
     usage = getattr(inner, "usage", {})
     return {
         "stage": "style_feedback_loop_and_literary_evaluation",
+        "generation_experiment_id": generation_experiment_id,
+        "run_tag": run_tag,
         "schema_version": EVALUATION_SCHEMA_VERSION,
         "decision_schema_version": FEEDBACK_DECISION_SCHEMA_VERSION,
-        "max_iterations": MAX_ITERATIONS,
+        "max_iterations": max_iterations,
         "evaluation_policy": policy.to_dict(),
         "provider": getattr(provider, "provider_id", ""),
         "model": getattr(provider, "model", ""),

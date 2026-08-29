@@ -46,6 +46,7 @@ from .schema import (
 
 GENERATION_DIRNAME = "generation"
 EXPERIMENT_ID = "phase7-generation-v0.1"
+EXPERIMENT_ID_82 = "phase8_2-generation-v0.1"  # Phase 8.2 真实验证的独立实验身份（austen_02/dickens_02）
 
 # 两位作者严格一致（spec §二）；唯一变量是画像导出的风格控制。
 GENERATION_PARAMETERS = GenerationParameters(temperature=0.8, top_p=0.9, max_tokens=2048)
@@ -62,9 +63,19 @@ MAX_PROMPT_CHARS_GUARD = 6000
 ACCEPTABLE_FINISH_REASONS = frozenset({"stop"})
 
 
-def generation_layout(data_root_: Path | None = None) -> dict[str, Path]:
+def generation_layout(data_root_: Path | None = None,
+                      experiment_id: str | None = None) -> dict[str, Path]:
+    """生成产物根目录。
+
+    默认（experiment_id == EXPERIMENT_ID 或 None）写到扁平的 `generation/`；指定其它
+    experiment_id 时写到 `generation/{experiment_id}/` 子目录，与 Phase 7 产物物理隔离
+    （绝不覆盖 austen_01 / dickens_01）。plumbing 记录恒在默认根目录（一次性传输验证）。
+    """
     base = Path(data_root_) if data_root_ is not None else default_data_root()
-    return {"root": base / "analysis" / GENERATION_DIRNAME}
+    root = base / "analysis" / GENERATION_DIRNAME
+    if experiment_id and experiment_id != EXPERIMENT_ID:
+        root = root / experiment_id
+    return {"root": root}
 
 
 def _write_json(path: Path, data: Any) -> None:
@@ -233,9 +244,10 @@ def run_plumbing(data_root_: Path | None = None,
 # formal generation：Austen + Dickens（fresh request，不藏 cache）
 # --------------------------------------------------------------------------- #
 def run_generation(data_root_: Path | None = None,
-                   provider: GenerationProvider | None = None) -> dict[str, Any]:
+                   provider: GenerationProvider | None = None,
+                   experiment_id: str = EXPERIMENT_ID) -> dict[str, Any]:
     base = Path(data_root_) if data_root_ is not None else default_data_root()
-    out_dir = generation_layout(base)["root"]
+    out_dir = generation_layout(base, experiment_id)["root"]
     out_dir.mkdir(parents=True, exist_ok=True)
 
     provider = provider or build_generation_provider()
@@ -248,7 +260,8 @@ def run_generation(data_root_: Path | None = None,
     band_thresholds = _band_thresholds(base, train_work_ids)
 
     # plumbing gate（Phase 7.1 §2）：正式生成前必须有合法 plumbing 记录，否则 fail-closed。
-    plumbing = _read_plumbing(out_dir)
+    # plumbing 恒在默认根目录（一次性传输验证，同 provider/model/params 复用，不随实验重发）。
+    plumbing = _read_plumbing(generation_layout(base)["root"])
     _require_valid_plumbing(plumbing, provider)
 
     passages: dict[str, GeneratedPassage] = {}
@@ -259,19 +272,19 @@ def run_generation(data_root_: Path | None = None,
         result = provider.generate(prompt.text, GENERATION_PARAMETERS)
         passage = _build_passage(
             author_id, plan, prompt, result, provider, GENERATION_PARAMETERS,
-            provenance, EXPERIMENT_ID, fresh_request=True)
+            provenance, experiment_id, fresh_request=True)
         passages[author_id] = passage
 
         _write_json(out_dir / f"{author_id}_generation.json", passage.to_dict())
         (out_dir / f"{author_id}_passage.md").write_text(
             _render_passage_md(passage), encoding="utf-8")
 
-    experiment = _build_experiment(passages, provider, plumbing)
+    experiment = _build_experiment(passages, provider, plumbing, experiment_id)
     _write_json(out_dir / "generation_experiment.json", experiment)
     (out_dir / "generation_comparison_report.md").write_text(
-        _render_comparison(passages, plumbing), encoding="utf-8")
+        _render_comparison(passages, plumbing, experiment_id), encoding="utf-8")
 
-    summary = _build_summary(passages, plumbing, experiment)
+    summary = _build_summary(passages, plumbing, experiment, experiment_id)
     _write_json(out_dir / "generation_summary.json", summary)
     return summary
 
@@ -318,9 +331,10 @@ def _require_valid_plumbing(plumbing: dict[str, Any] | None,
 
 def _build_experiment(passages: dict[str, GeneratedPassage],
                       provider: GenerationProvider,
-                      plumbing: dict[str, Any] | None) -> dict[str, Any]:
+                      plumbing: dict[str, Any] | None,
+                      experiment_id: str = EXPERIMENT_ID) -> dict[str, Any]:
     return {
-        "experiment_id": EXPERIMENT_ID,
+        "experiment_id": experiment_id,
         "stage": "style_conditioned_generation",
         "generation_version": GENERATION_VERSION,
         "generation_schema_version": GENERATION_SCHEMA_VERSION,
@@ -357,11 +371,12 @@ def _author_generation_summary(p: GeneratedPassage) -> dict[str, Any]:
 
 def _build_summary(passages: dict[str, GeneratedPassage],
                    plumbing: dict[str, Any] | None,
-                   experiment: dict[str, Any]) -> dict[str, Any]:
+                   experiment: dict[str, Any],
+                   experiment_id: str = EXPERIMENT_ID) -> dict[str, Any]:
     totals = _totals(passages)
     return {
         "stage": "style_conditioned_generation",
-        "experiment_id": EXPERIMENT_ID,
+        "experiment_id": experiment_id,
         "deterministic_plan_and_prompt": True,
         "real_generation": True,
         "no_auto_evaluation": True,          # Phase 8 才做
@@ -418,7 +433,8 @@ def _render_passage_md(p: GeneratedPassage) -> str:
 
 
 def _render_comparison(passages: dict[str, GeneratedPassage],
-                       plumbing: dict[str, Any] | None) -> str:
+                       plumbing: dict[str, Any] | None,
+                       experiment_id: str = EXPERIMENT_ID) -> str:
     lines = [
         "# Weaver Style Engine — Generation 对比报告（Phase 7）",
         "",
@@ -426,7 +442,7 @@ def _render_comparison(passages: dict[str, GeneratedPassage],
         "本报告只做基本检查（词数 / token / finish_reason / prompt hash），**不做文学评价**",
         "（Phase 8）。",
         "",
-        f"- **experiment_id**: `{EXPERIMENT_ID}`",
+        f"- **experiment_id**: `{experiment_id}`",
         f"- **provider / model**: `{passages[AUTHOR_IDS[0]].provider}` / "
         f"`{passages[AUTHOR_IDS[0]].model}`",
         f"- **生成参数**: {GENERATION_PARAMETERS.to_dict()}",

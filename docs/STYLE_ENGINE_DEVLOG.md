@@ -1414,6 +1414,35 @@ Phase 9。**
 
 ---
 
+## Phase 8.2 Real End-to-End Validation — COMPLETE（真实 deepseek-chat 运行）
+
+Phase 8.2 确定性实现经人工 review 后进入真实验证（仍是 Phase 8.2，非 Phase 9）。全新生成
+austen_02 / dickens_02（experiment_id=`phase8_2-generation-v0.1`，fresh，绝不读 Phase 7 生成
+缓存；绝不覆盖 `generation/` / `evaluation/` / `evaluation_v2/`），走完整四阶 gate。
+
+- 实验身份参数化（最小改动，默认向后兼容）：`run_generation(experiment_id=...)` 写
+  `generation/{id}/` 子目录（plumbing 恒在默认根目录，一次性传输验证复用、不随实验重发）；
+  `run_evaluation(generation_experiment_id, run_tag, summary_prefix, max_iterations)` 读指定
+  generation 子目录、写 `evaluation_v3/{author}_02/` + 可命名 summary/report。新增
+  `knowledge/evaluation/phase8_2.py` runner。
+- **§二十 合规**：`max_iterations=1`（单轮；改善 → accept，不自动第二轮）。此前的
+  `MAX_ITERATIONS=2` 会让"改善但未清零"落 `continue`，违反单轮约定，已参数化修正。
+- 成本预检（§十六）：预估 generation ~3.4K + 全 fresh 测量 ~61K ≈ 64K，超 50K 阈值 → 报成本
+  等人工批准后才跑。**实际**：generation 3,346 + evaluation 79,419 = **82,765 token**（48
+  real requests，0 cache hit）。
+- 结果（两位作者均 SUBSTANTIVE 实质改写，非 dry-run 预测的 no_effect）：
+  - **austen_02**：6 改写项、改动词 20（3.68%）、完整性 passed、文学 8.15→8.5（+0.35 无下降）、
+    风格偏差 6→6（无改善）→ **roll_back**（保留原文）。
+  - **dickens_02**：11 改写项、改动词 17（2.86%）、完整性 passed、文学 8.3→8.5（+0.2）、
+    风格偏差 11→8（改善）→ **accept**（max_iterations=1 reached）。
+  - 改写器自报 `claimed_*` 与确定性 `word_change_count` 一致（均实质改写），与 Phase 8.1
+    "自报实质/实际 no-op" 的幻觉形成对照。
+- 产物：`generation/phase8_2-generation-v0.1/`、`evaluation_v3/{author}_02/`、
+  `phase8_2_real_validation_summary.json`、`phase8_2_real_validation_report.md`。
+- Tests：**361 passed**（+5 实验身份/布局/max_iterations 贯通，全部零 token 确定性）。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git
