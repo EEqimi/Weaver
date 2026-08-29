@@ -367,16 +367,16 @@ def test_empty_generation_raises_friendly_error(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 12. feedback=1 反馈闭环底层 LLM 错误 → 友好 WriterError（不裸抛 500）
+# 12. feedback=1 反馈闭环失败 → 保留初稿 + feedback=failed（不 raise / 不覆盖初稿）
 # --------------------------------------------------------------------------- #
-def test_feedback_eval_error_maps_to_friendly_writer_error(monkeypatch, tmp_path):
-    """回归（真实验收第二次）：feedback=1 时改写器/评价器真实 LLM 返回无法解析的 JSON
-    （LLMResponseError，如 402 余额不足 / 模型返回畸形输出）曾在 `_run_feedback` 中
-    裸抛，UI 显示 "生成失败：LLMResponseError"（500）。服务层必须把它映射为友好
-    WriterError（绝不向用户泄露内部堆栈/密钥）。零 LLM / 零 token。
+def test_feedback_failure_keeps_draft_and_marks_failed(monkeypatch, tmp_path):
+    """回归（真实验收第二轮）：feedback=1 时改写器/评价器真实 LLM 返回无法解析的 JSON
+    （LLMResponseError，如 402 余额不足 / 模型返回畸形/截断输出）。初稿已成功生成，
+    故必须保留初稿、feedback 标记 failed、明确 reason，绝不 raise（否则用户拿不到已
+    生成的作品）、绝不伪造 accept/no_effect、绝不覆盖初稿。零 LLM / 零 token。
     """
     _install_ready(monkeypatch)
-    _install_plan_prompt_passage(monkeypatch, text="Original text.")
+    _install_plan_prompt_passage(monkeypatch, text="Draft text.")
 
     def _boom(base, author_id, author_names, plan, profile, request, passage,
               band_thresholds, evaluation_provider):
@@ -384,10 +384,30 @@ def test_feedback_eval_error_maps_to_friendly_writer_error(monkeypatch, tmp_path
 
     monkeypatch.setattr(writer, "_run_feedback", _boom)
 
-    provider = DummyGenerationProvider(content="Original text.")
-    with pytest.raises(writer.WriterError, match="无法解析"):
-        writer.generate("austen", _req(), provider=provider, data_root_=tmp_path,
-                        feedback_iterations=1)
+    provider = DummyGenerationProvider(content="Draft text.")
+    result = writer.generate("austen", _req(), provider=provider,
+                             data_root_=tmp_path, feedback_iterations=1)
+
+    # 初稿保留，绝不覆盖；feedback 明确 failed，绝不伪装成功。
+    assert result["generated_text"] == "Draft text."
+    assert result["feedback"] == {"status": "failed",
+                                  "reason": "LLM 返回了无法解析的响应（评价/改写失败）："
+                                            "JSON 解析失败: Expecting ',' delimiter"}
+    assert result["word_count"] == 2          # 初稿 2 词，未被改写文本覆盖
+
+
+def test_feedback_failure_renders_warning_in_result_page(monkeypatch):
+    """feedback=failed 时，结果页必须显示警示 + 仍显示初稿，绝不显示成功 outcome。"""
+    from knowledge.service import webapp
+    result = {"author_id": "austen", "display_name": "Jane Austen", "word_count": 2,
+              "finish_reason": "stop", "provider": "deepseek",
+              "model": "deepseek-chat", "generation_id": "gid",
+              "generated_text": "Draft text.",
+              "feedback": {"status": "failed", "reason": "LLM 返回了无法解析的响应"}}
+    page = webapp._result_page("austen", "Jane Austen", result)
+    assert "初稿已生成，但自动评价/优化失败" in page
+    assert "Draft text." in page
+    assert "Feedback (1 pass): outcome" not in page
 
 
 # --------------------------------------------------------------------------- #

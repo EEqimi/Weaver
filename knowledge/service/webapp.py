@@ -106,9 +106,15 @@ def _result_page(author_id: str, display_name: str, r: dict[str, Any]) -> str:
     fb = r.get("feedback")
     feedback_html = ""
     if fb:
-        feedback_html = (
-            f'<p>Feedback (1 pass): outcome <code>{_escape(fb.get("outcome"))}</code>'
-            f' — {_escape((fb.get("decision") or {}).get("reason", ""))}</p>')
+        if fb.get("status") == "failed":
+            # 反馈优化失败：初稿已成功生成，明确警示，绝不伪装成成功/优化结果。
+            feedback_html = (
+                f'<p class="warn">初稿已生成，但自动评价/优化失败：'
+                f'{_escape(fb.get("reason", ""))}</p>')
+        else:
+            feedback_html = (
+                f'<p>Feedback (1 pass): outcome <code>{_escape(fb.get("outcome"))}</code>'
+                f' — {_escape((fb.get("decision") or {}).get("reason", ""))}</p>')
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Generated — {_escape(display_name)}</title>
@@ -116,6 +122,7 @@ def _result_page(author_id: str, display_name: str, r: dict[str, Any]) -> str:
  body {{ font-family: -apple-system, Segoe UI, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }}
  pre {{ white-space: pre-wrap; background: #f7f7f7; padding: 1rem; border-radius: 6px; line-height: 1.5; }}
  .meta {{ color: #555; font-size: .9rem; }}
+ .warn {{ color: #8a6d00; background: #fff8e1; padding: .6rem .8rem; border-radius: 4px; margin: 1rem 0; }}
  a {{ display: inline-block; margin-top: 1rem; }}
 </style></head><body>
 <h1>Generated passage — {_escape(display_name)}</h1>

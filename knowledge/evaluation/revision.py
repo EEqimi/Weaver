@@ -59,6 +59,13 @@ _EVAL_DIM_CATEGORY: dict[str, str] = {
 # 不散落硬编码常数（spec §二 STEP 2）。
 DEFAULT_WEAK_SCORE_THRESHOLD = EvaluationPolicy().weak_score_threshold
 
+# RevisionRewriter 的最小编辑改写需把整段 revised_text（约 1000–1500 words）+ JSON
+# wrapper + change_descriptions 一并返回；provider 默认 2048 completion tokens 会被
+# 截断（真实人工验收已复现：raw 以 '{\n "revised_text": "..."' 开头却缺结尾 '}'）。
+# 这里单独放宽到 DeepSeek 单次输出的安全上限，绝不改普通 generation 的 max_tokens，
+# 并把该值纳入 cache key（避免同一 prompt 不同 max_tokens 命中旧截断缓存）。
+REVISION_MAX_TOKENS = 8192
+
 
 # --------------------------------------------------------------------------- #
 # 改写计划（纯函数）
@@ -246,8 +253,10 @@ class RevisionRewriter:
             analyzer_version=ANALYZER_VERSION, schema_version=REVISION_RESULT_SCHEMA_VERSION,
             model=self._provider.model, provider_id=self._provider.provider_id,
             prompt_name=f"revision:blind={self.blind}:n_items={len(plan.revision_items)}",
+            extra={"max_tokens": REVISION_MAX_TOKENS},
         )
-        raw = self._provider.complete(messages, cache_hint=key)
+        raw = self._provider.complete(
+            messages, cache_hint=key, max_tokens=REVISION_MAX_TOKENS)
         data = parse_json_response(raw)
         return self._to_result(plan, original_text, data)
 

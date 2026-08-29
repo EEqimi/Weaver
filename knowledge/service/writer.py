@@ -222,17 +222,18 @@ def generate(author_id: str, request: WritingRequest, *,
     }
 
     if feedback_iterations == 1:
-        # 反馈闭环是额外 API 消耗：其底层错误（评价/改写/完整性检查返回无法解析的
-        # JSON → LLMResponseError、传输失败 → LLMTransportError、泄露守卫/校验 →
-        # EvalError）同样映射为友好 WriterError，绝不裸抛到 UI（否则浏览器显示
-        # "生成失败：LLMResponseError" 而非可读原因）。
         try:
             fb = _run_feedback(
                 base, author_id, author_names, plan, profile, request, passage,
                 band_thresholds, evaluation_provider)
-        except (LLMResponseError, EvalError, LLMTransportError,
+        except (WriterError, LLMResponseError, EvalError, LLMTransportError,
                 LLMNotConfiguredError) as e:
-            raise WriterError(_friendly_llm_error(e)) from e
+            # 可选反馈优化失败：绝不 raise（否则用户拿不到已成功生成的初稿）。保留初稿，
+            # feedback 标记 failed；绝不伪造 accept / no_effect / roll_back，绝不覆盖
+            # 初稿。只有 initial generation 本身失败时，整个 Generate 才应失败。
+            reason = str(e) if isinstance(e, WriterError) else _friendly_llm_error(e)
+            out["feedback"] = {"status": "failed", "reason": reason}
+            return out
         out["feedback"] = fb
         out["generated_text"] = fb["final_text"]
         out["word_count"] = len(fb["final_text"].split())
