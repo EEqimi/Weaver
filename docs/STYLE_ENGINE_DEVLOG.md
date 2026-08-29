@@ -1759,6 +1759,22 @@ Request C：V0.1 冻结前补一个最小可用 Writer UI，让用户无需手�
 
 ---
 
+## V0.1 Freeze (Final)
+
+- Phase 9.5 review 通过，执行最终 Freeze Pass（不新增功能、不改核心算法、不运行真实 LLM）。
+- SPEC §十二/§二十一/§二十二/§二十三 保持 `UNRECOVERED / NOT PART OF V0.1 FREEZE
+  CRITERIA`（保留编号仅为引用兼容，非未完成模块）。
+- SPEC / STATUS / DEVLOG 三方一致；SPEC §6 冻结判定由 `READY_FOR_V0_1_FREEZE` 改为
+  **`FROZEN`（V0.1 正式冻结 / COMPLETE）**。
+- Freeze audit：无 correctness blocker；无意外 production-level Austen/Dickens 硬编码；
+  Generic Author Onboarding 可用；无真实 LLM 调用；无 API key / corpus / generation
+  artifact / cache 误提交；git 状态符合预期。
+- Tests：**404 passed**（零 token、零真实 LLM）。
+- 后续：不 merge main、不提 PR、不自动进入 V0.2、不运行真实 LLM。建议 tag
+  `style-engine-v0.1.0`（待人工确认后再打）。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

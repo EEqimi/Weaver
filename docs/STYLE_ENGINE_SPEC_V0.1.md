@@ -197,4 +197,5 @@ Austen medium 异常；`>3 样本正式统计` 与 `段级 drift 接入 Revision
 | 最小 Writer UI（作者来自 registry、真实 LLM 生成、可选单轮反馈、零新依赖） | ✅ `IMPLEMENTED`（§3.12） |
 | 完整测试通过 | ✅ 404 passed（含 11 新 onboarding + 11 新 Writer 服务层测试，零 LLM） |
 
-**冻结判定：`READY_FOR_V0_1_FREEZE`** —— 见最终报告。
+**冻结判定：`FROZEN`（V0.1 正式冻结 / COMPLETE）** —— 见最终报告。后续改动进入 V0.2
+backlog，不得在 V0.1 冻结范围内继续新增功能或修改核心算法。

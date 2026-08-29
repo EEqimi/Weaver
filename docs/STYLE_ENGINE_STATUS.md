@@ -6,7 +6,7 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 9.5 — COMPLETE：最小 Writer UI + 服务层（`knowledge/service/`，作者来自 registry、真实 LLM 生成、可选单轮反馈、零新依赖）；404 tests |
+| **Current phase** | **V0.1 FROZEN / COMPLETE** — 冻结已正式生效（Phase 1–9.5 全部完成，404 tests；unrecovered §十二/二十一/二十二/二十三 非冻结判据）；后续改动进入 V0.2 backlog |
 | **Last completed checkpoint** | Phase 9.4：CORPUS 由 `manifests/*.json` 数据驱动；`author_ids()` 派生作者全集；`knowledge/ingestion/` onboarding API + CLI（`validate/register/build/onboard_author`，状态 `INVALID`/`READY_FOR_NEXT_STEP`/`REQUIRES_LLM_APPROVAL`）；第三作者零核心代码改动 smoke test 通过 |
 | **Current branch** | `feature/style-engine-v0.1` |
 
@@ -452,5 +452,6 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - Tests：**404 passed**（+11，Dummy/fake，零 token、零真实 LLM）。
 
 ## Next planned action
-- **V0.1 冻结 review 已出：`READY_FOR_V0_1_FREEZE`。STOP，等待人工确认冻结。**
-  不 merge main、不提 PR、不自动进入 V0.2、不运行新作者真实 LLM、不扩大 controllability。
+- **V0.1 已正式 `FROZEN` / `COMPLETE`。** 不 merge main、不提 PR、不自动进入 V0.2、
+  不运行真实 LLM。V0.2 项（>3 样本正式统计、段级 drift 接入 RevisionPlanner、
+  multi-author mixing 等）见 SPEC §5 backlog。
