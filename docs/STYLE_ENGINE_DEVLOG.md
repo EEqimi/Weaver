@@ -1578,9 +1578,25 @@ Phase 8 的 `_layer_d_diagnostic` 只对整段正文算**一个**到作者质心
   容差；run_controllability 编排（3 passages/作者、产物落盘、单调判定、provider 零真实调用）。
   **378 passed**。
 
+### §19.5 真实生成结果（已批准运行）
+
+真实生成（`python -m knowledge.generation.controllability`，10,149 total tokens，6 fresh
+requests）——单次 3 点采样，证据弱，仅供方向性参考：
+
+| 作者 | low | medium | high | 单调递减? | 方向 |
+|---|---|---|---|---|---|
+| austen | 0.157 | 0.270 | 0.193 | 否 | non_monotonic |
+| dickens | 0.164 | 0.125 | 0.111 | 是 | decreasing |
+
+- **Dickens**：单调递减（强度↑ → 距离↓），符合假设。
+- **Austen**：非单调（medium 反超 high），说明单一风格强度旋钮对 Layer D 距离的影响
+  因作者而异、且单次采样噪声大；不视为失败，是诚实的混合观测。
+- 结论定性为**弱证据**：LLM 抽样随机 + 每作者仅 1 次 × 3 档，不足以断言因果。
+
 ### Non-goals
 
-- §19.5 真实生成运行（等批准 + 成本预检）。绝不自动进入真实 LLM 运行、不合并 main、不提 PR。
+- §19.5 多轮平均 / 重跑确认（单调性证据强度受限于单次采样，非本次范围）。绝不自动进入
+  真实 LLM 运行、不合并 main、不提 PR。
 
 ---
 

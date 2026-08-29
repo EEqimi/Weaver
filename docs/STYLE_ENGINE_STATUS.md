@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 9.2/9.3 — COMPLETE（确定性实现，未运行真实 LLM）：§15.4 段级 stylometric 漂移定位（逐句余弦距离漂移图）+ §19.5 生成可控性 harness（low/medium/high 强度覆写 + 单调性判定）；378 tests |
-| **Last completed checkpoint** | Phase 9.2/9.3 确定性实现：`_layer_d_diagnostic` 新增 `segment_drift`（段级漂移图，诊断-only）+ `stylometric_distance`；新建 `knowledge/generation/controllability.py`（`apply_intensity`/`check_monotonic`/`run_controllability`）；+10 测试（3 段级 + 7 可控性），零真实 LLM；378 tests |
+| **Current phase** | Phase 9.2/9.3 — COMPLETE（含 §19.5 真实生成）：§15.4 段级 stylometric 漂移定位 + §19.5 生成可控性实验（low/medium/high 真实 `deepseek-chat` 重生成 + 单调性观测）；378 tests |
+| **Last completed checkpoint** | §19.5 真实生成（6 次 fresh 请求，10,149 tokens）：Dickens 单调递减（0.164→0.125→0.111），Austen 非单调（0.157→0.270→0.193）——单次 3 点采样、LLM 随机，弱证据，已如实记录 |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -35,7 +35,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 ## What is not implemented yet
 - Full-corpus LLM feature extraction (only the 40-chunk calibration sample has LLM features).
-- §19.5 真实生成运行（harness 已就绪，但真实 LLM 运行门控在 §十六 成本预检 + 显式批准之后）。
+- §19.5 多次重复采样求均值（当前单次 3 点采样证据弱，Austen 非单调、Dickens 单调，需
+  多轮重跑以压低 LLM 抽样方差后再下结论）。
 - 把段级漂移图**接入改写 planner 做段级目标编辑**（漂移图本次仅产出 + 持久化，仍整段最小编辑）。
 - Multi-author style mixing (the `conflicts` / `resolution_required` structure is reserved in
   `StylePlan.planner_metadata`, currently empty for single-author planning).
@@ -382,7 +383,15 @@ Short current-state snapshot (≈1–2 min read). History lives in
   `CONTROLLABILITY_VERSION=0.1.0`（独立）。
 - Tests：**378 passed**（+10：3 段级 + 7 可控性，零 token，零真实 LLM）。
 
+### §19.5 真实生成结果（deepseek-chat，6 次 fresh 请求，10,149 tokens）
+
+- **Dickens**：`low=0.164 → medium=0.125 → high=0.111`，**单调递减**（强度↑ → 距离↓，符合预期）。
+- **Austen**：`low=0.157 → medium=0.270 → high=0.193`，**非单调**（medium 反而最远，high 未超 low）。
+- 结论：单次 3 点采样、LLM 抽样随机，**证据弱**；强度措辞旋钮（activation）对 stylometric
+  距离的单调控制在本轮**不稳健**（1/2 作者符合）。不视为失败（报告观测），可多轮重跑求均值
+  后再下结论。
+
 ## Next planned action
-- **STOP，报告，等待人工 review**：Phase 9.2/9.3 确定性实现已跑完（378 tests，零真实 LLM）。
-  §19.5 真实生成运行（需 provider + plumbing）门控在 §十六 成本预检 + 显式批准之后；绝不
-  自动进入真实 LLM 运行、不合并 main、不提 PR。
+- **STOP，报告，等待人工 review**：Phase 9.2/9.3 已跑完（确定性实现 + §19.5 真实生成）。
+  单调性仅单次弱证据（Dickens 单调、Austen 非单调）；可选下一步：多次重复采样求均值以压低
+  LLM 方差。绝不自动进入进一步真实 LLM 运行、不合并 main、不提 PR。
