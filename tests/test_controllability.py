@@ -11,21 +11,27 @@
 
 绝不调用真实模型；绝不读 DEEPSEEK_API_KEY；绝不写真实 data/（产物写入 tmp_path）。
 """
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from knowledge.generation.controllability import (
     EXPERIMENT_ID_95, INTENSITY_TO_ACTIVATION, INTENSITY_LEVELS,
-    apply_intensity, check_monotonic, run_controllability,
+    _effect_direction, _summarize_samples, apply_intensity, check_monotonic,
+    run_controllability, run_controllability_repeated,
 )
 from knowledge.generation import controllability as cmod
+from knowledge.generation.run import generation_layout
 from knowledge.generation.schema import (
     assert_no_author_identity, assert_no_imitation_instruction,
 )
 from knowledge.planning.compiler import PromptCompiler
 from knowledge.planning.schema import PlannedControl, StylePlan
-from knowledge.schema.versions import CONTROLLABILITY_VERSION, STYLE_PLAN_SCHEMA_VERSION
+from knowledge.schema.versions import (
+    CONTROLLABILITY_REPEATED_VERSION, CONTROLLABILITY_VERSION,
+    STYLE_PLAN_SCHEMA_VERSION,
+)
 
 
 def _pc(feature_id, activation, bucket, guidance="Use dialogue relatively often."):
@@ -233,3 +239,134 @@ def test_run_controllability_writes_artifacts_and_monotonic_verdict(monkeypatch,
             assert (root / f"{aid}_{intensity}_passage.md").exists()
     assert (root / "controllability_summary.json").exists()
     assert (root / "controllability_report.md").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9.3 repeated-sampling（确定性，零 LLM）
+# --------------------------------------------------------------------------- #
+def test_summarize_samples_mean_median_std():
+    s = _summarize_samples([0.1, 0.2, 0.3])
+    assert s["n"] == 3
+    assert s["mean"] == pytest.approx(0.2)
+    assert s["median"] == pytest.approx(0.2)
+    assert s["min"] == pytest.approx(0.1)
+    assert s["max"] == pytest.approx(0.3)
+    assert s["std"] > 0  # 总体 std，非零
+    assert s["samples"] == [0.1, 0.2, 0.3]
+
+
+def test_effect_direction():
+    assert _effect_direction({"low": 0.2, "high": 0.1})[0] == "decreasing"
+    assert _effect_direction({"low": 0.1, "high": 0.2})[0] == "increasing"
+    assert _effect_direction({"low": 0.1, "high": 0.1})[0] == "flat"
+    # effect_size = low - high（正值 = 符合假设方向）。
+    assert _effect_direction({"low": 0.2, "high": 0.1})[1] == pytest.approx(0.1)
+
+
+def _write_existing_summary(tmp_path, first_distances):
+    out_dir = generation_layout(tmp_path, EXPERIMENT_ID_95)["root"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "authors": {aid: {"distances": first_distances[aid]}
+                    for aid in ("austen", "dickens")},
+    }
+    (out_dir / "controllability_summary.json").write_text(
+        json.dumps(summary), encoding="utf-8")
+
+
+def _install_repeated_fakes(monkeypatch, new_distances):
+    monkeypatch.setattr(
+        cmod, "_load_profile",
+        lambda base, aid: SimpleNamespace(author_id=aid,
+                                          author_scope={"train_work_ids": []}))
+    monkeypatch.setattr(cmod, "_band_thresholds", lambda base, ids: {})
+    monkeypatch.setattr(cmod, "_read_plumbing", lambda out_dir: {})
+    plumbing_calls = {"n": 0}
+
+    def _require(plumbing, provider):
+        plumbing_calls["n"] += 1
+    monkeypatch.setattr(cmod, "_require_valid_plumbing", _require)
+    monkeypatch.setattr(
+        cmod, "_plan_and_prompt_at_intensity",
+        lambda profile, bt, intensity: (
+            SimpleNamespace(style_plan_id=intensity, author_id=profile.author_id,
+                            source_profile_hash="ph"),
+            SimpleNamespace(text=f"prompt:{profile.author_id}:{intensity}")))
+    monkeypatch.setattr(cmod, "_provenance", lambda plan, bt, profile: {})
+    monkeypatch.setattr(
+        cmod, "_build_passage",
+        lambda author_id, plan, prompt, result, provider, parameters, provenance,
+               experiment_id, fresh_request=True: _Passage(author_id,
+                                                           plan.style_plan_id))
+
+    state: dict[tuple[str, str], int] = {}
+
+    def _stylo(text, author_id, base):
+        intensity = text.split(":")[1]
+        key = (author_id, intensity)
+        idx = state.get(key, 0)
+        state[key] = idx + 1
+        return new_distances[key][idx]
+    monkeypatch.setattr(cmod, "stylometric_distance", _stylo)
+
+    return _RecordingProvider(), plumbing_calls
+
+
+def test_run_controllability_repeated_n3_and_monotonic(monkeypatch, tmp_path):
+    first = {
+        "austen": {"low": 0.15, "medium": 0.27, "high": 0.19},
+        "dickens": {"low": 0.16, "medium": 0.13, "high": 0.11},
+    }
+    # 新样本：austen medium 仍偏高（均值非单调）；dickens 保持递减。
+    new = {
+        ("austen", "low"): [0.14, 0.16],
+        ("austen", "medium"): [0.26, 0.28],
+        ("austen", "high"): [0.18, 0.20],
+        ("dickens", "low"): [0.17, 0.15],
+        ("dickens", "medium"): [0.14, 0.12],
+        ("dickens", "high"): [0.10, 0.12],
+    }
+    _write_existing_summary(tmp_path, first)
+    provider, plumbing_calls = _install_repeated_fakes(monkeypatch, new)
+
+    summary = run_controllability_repeated(data_root_=tmp_path, provider=provider)
+
+    assert summary["controllability_repeated_version"] == CONTROLLABILITY_REPEATED_VERSION
+    assert summary["n_total_samples_per_cell"] == 3
+    assert summary["new_request_count"] == 2 * len(INTENSITY_LEVELS) * 2  # 12
+
+    # Austen：n=3，medium 偏高未被平均掉 → 均值仍 non-monotonic。
+    a = summary["authors"]["austen"]
+    assert a["per_intensity"]["low"]["n"] == 3
+    assert a["per_intensity"]["low"]["samples"] == [0.15, 0.14, 0.16]
+    assert a["per_intensity"]["low"]["mean"] == pytest.approx(0.15)
+    assert a["monotonic_on_mean"]["monotonic"] is False
+    assert a["monotonic_on_mean"]["direction"] == "non_monotonic"
+
+    # Dickens：n=3 后递减趋势仍成立。
+    d = summary["authors"]["dickens"]
+    assert d["monotonic_on_mean"]["monotonic"] is True
+    assert d["monotonic_on_mean"]["direction"] == "decreasing"
+    assert d["effect_direction"] == "decreasing"
+    assert d["effect_size_mean"] == pytest.approx(0.05)
+
+    assert provider.calls == 12
+    assert plumbing_calls["n"] == 1
+
+    out_dir = generation_layout(tmp_path, EXPERIMENT_ID_95)["root"]
+    assert (out_dir / "controllability_repeated_summary.json").exists()
+    assert (out_dir / "controllability_repeated_report.md").exists()
+    for aid in ("austen", "dickens"):
+        for intensity in INTENSITY_LEVELS:
+            assert (out_dir / f"{aid}_{intensity}_rep1_generation.json").exists()
+            assert (out_dir / f"{aid}_{intensity}_rep2_passage.md").exists()
+    # 原单次 summary 未被覆盖（首样本距离原样保留）。
+    original = json.loads(
+        (out_dir / "controllability_summary.json").read_text(encoding="utf-8"))
+    assert original["authors"]["austen"]["distances"]["low"] == 0.15
+
+
+def test_run_controllability_repeated_missing_summary_fails_closed(monkeypatch, tmp_path):
+    _install_repeated_fakes(monkeypatch, {})
+    with pytest.raises(cmod.GenerationError):
+        run_controllability_repeated(data_root_=tmp_path, provider=_RecordingProvider())

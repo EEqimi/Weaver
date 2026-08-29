@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 9.2/9.3 — COMPLETE（含 §19.5 真实生成）：§15.4 段级 stylometric 漂移定位 + §19.5 生成可控性实验（low/medium/high 真实 `deepseek-chat` 重生成 + 单调性观测）；378 tests |
-| **Last completed checkpoint** | §19.5 真实生成（6 次 fresh 请求，10,149 tokens）：Dickens 单调递减（0.164→0.125→0.111），Austen 非单调（0.157→0.270→0.193）——单次 3 点采样、LLM 随机，弱证据，已如实记录 |
+| **Current phase** | Phase 9.2/9.3 — COMPLETE（含 §19.5 真实生成 + repeated-sampling n=3）：§15.4 段级 stylometric 漂移定位 + §19.5 生成可控性实验（low/medium/high 真实 `deepseek-chat` 重生成 + 单调性观测 + 重复采样均值/中位数判定）；382 tests |
+| **Last completed checkpoint** | §19.5 repeated-sampling（每档 n=3，12 新 fresh 请求，20,799 tokens）：Dickens 单调递减 n=3 仍成立（mean 0.154→0.127→0.120）；Austen medium 偏高未被平均掉（mean 0.172→0.216→0.172，仍 non-monotonic）——小样本弱证据、非硬门 |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -35,8 +35,7 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 ## What is not implemented yet
 - Full-corpus LLM feature extraction (only the 40-chunk calibration sample has LLM features).
-- §19.5 多次重复采样求均值（当前单次 3 点采样证据弱，Austen 非单调、Dickens 单调，需
-  多轮重跑以压低 LLM 抽样方差后再下结论）。
+- §19.5 >3 样本的正式统计（当前 n=3 仍小，未做假设检验/功效分析/多轮方差分解）。
 - 把段级漂移图**接入改写 planner 做段级目标编辑**（漂移图本次仅产出 + 持久化，仍整段最小编辑）。
 - Multi-author style mixing (the `conflicts` / `resolution_required` structure is reserved in
   `StylePlan.planner_metadata`, currently empty for single-author planning).
@@ -371,27 +370,39 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 铁律不变：stylometric 指纹仅诊断，绝不生成改写指令；短段距离是段内**相对排序**。
 - 新增 `SEGMENT_DRIFT_VERSION=0.1.0`（独立，不 bump STYLOMETRY/EVALUATION 版本）。
 
-## Phase 9.3 (Generation Controllability, §19.5) — COMPLETE（确定性 harness，未运行真实 LLM）
+## Phase 9.3 (Generation Controllability, §19.5) — COMPLETE（确定性 harness + 真实生成 + repeated-sampling）
 - 新建 `knowledge/generation/controllability.py`：`apply_intensity`（纯函数，把已激活语言
   控制统一重标 low→weak / medium→medium / high→strong，互异确定性 plan id 经
   `make_intensity_plan_id`）、`check_monotonic`（low≥medium≥high 容差判定，**报告观测非
   硬门**）、`run_controllability`（镜像 `run_generation`：plumbing gate + 泄露/预算守卫 +
   `_build_passage` 复用 + `stylometric_distance` 测量，落盘 `{author}_{intensity}_*` +
   `controllability_summary/report`）。
+- repeated-sampling：`run_controllability_repeated` 读首样本 + 每档 2 个 fresh → n=3，
+  汇总 mean/median/std/min/max + `monotonic_on_mean` / `monotonic_on_median` /
+  `effect_direction` / 区间重叠；落盘 `controllability_repeated_summary/report` +
+  `{author}_{intensity}_rep{{1,2}}_*`（**不覆盖**原单次实验）。
 - 强度旋钮 = 语言控制 `activation`（compiler `_ACTIVATION_PREFIX` 唯一带强度措辞的层）。
 - `knowledge/planning/schema.py` 新增 `make_intensity_plan_id`；新增
-  `CONTROLLABILITY_VERSION=0.1.0`（独立）。
-- Tests：**378 passed**（+10：3 段级 + 7 可控性，零 token，零真实 LLM）。
+  `CONTROLLABILITY_VERSION=0.1.0`、`CONTROLLABILITY_REPEATED_VERSION=0.1.0`（均独立）。
+- Tests：**382 passed**（+14：3 段级 + 11 可控性/repeated，零 token，零真实 LLM）。
 
 ### §19.5 真实生成结果（deepseek-chat，6 次 fresh 请求，10,149 tokens）
 
 - **Dickens**：`low=0.164 → medium=0.125 → high=0.111`，**单调递减**（强度↑ → 距离↓，符合预期）。
 - **Austen**：`low=0.157 → medium=0.270 → high=0.193`，**非单调**（medium 反而最远，high 未超 low）。
-- 结论：单次 3 点采样、LLM 抽样随机，**证据弱**；强度措辞旋钮（activation）对 stylometric
-  距离的单调控制在本轮**不稳健**（1/2 作者符合）。不视为失败（报告观测），可多轮重跑求均值
-  后再下结论。
+
+### §19.5 repeated-sampling 结果（deepseek-chat，每档 n=3，12 新 fresh 请求，20,799 tokens）
+
+- **Austen**（n=3）：mean `low=0.172 / medium=0.216 / high=0.172`，median `0.159/0.194/0.165`；
+  **mean 与 median 均 non-monotonic**——medium 偏高未被重复采样平均掉，且 medium std 最大
+  （0.038）；effect_size(low−high)=0.0006 ≈ 0（low≈high，趋势实质是"medium 异常偏高"）。
+- **Dickens**（n=3）：mean `low=0.154 / medium=0.127 / high=0.120`，median `0.153/0.125/0.123`；
+  **mean 与 median 均单调递减**——原单调趋势 n=3 后仍成立，effect_size(low−high)=0.034。
+- 结论：单次结论在 n=3 下**部分稳健**（Dickens 复现、Austen medium 系统性偏高非噪声）；但
+  三者区间仍两两重叠、档间差异与档内散布同阶，仍是**小样本弱证据**，不设硬 pass/fail。
 
 ## Next planned action
-- **STOP，报告，等待人工 review**：Phase 9.2/9.3 已跑完（确定性实现 + §19.5 真实生成）。
-  单调性仅单次弱证据（Dickens 单调、Austen 非单调）；可选下一步：多次重复采样求均值以压低
-  LLM 方差。绝不自动进入进一步真实 LLM 运行、不合并 main、不提 PR。
+- **STOP，报告，等待人工 review**：Phase 9.2/9.3 已跑完（确定性实现 + §19.5 真实生成 +
+  repeated-sampling n=3）。Austen medium 系统性偏高、Dickens 单调递减 n=3 复现，均为小样本
+  弱证据；可选下一步：>3 样本正式统计或段级漂移接入 planner。绝不自动进入进一步真实 LLM
+  运行、不合并 main、不提 PR。

@@ -1577,6 +1577,10 @@ Phase 8 的 `_layer_d_diagnostic` 只对整段正文算**一个**到作者质心
   原 plan 不动 + 拒绝未知强度；强度措辞前缀 + 泄露守卫；check_monotonic 递减/非单调/平坦/
   容差；run_controllability 编排（3 passages/作者、产物落盘、单调判定、provider 零真实调用）。
   **378 passed**。
+- repeated-sampling（+4 tests，零 token）：`_summarize_samples`（mean/median/std）、
+  `_effect_direction`、`run_controllability_repeated` 编排（读首样本 + 2 fresh/档 → n=3、
+  12 新请求、均值/中位数单调判定、产物落盘、原 summary 不覆盖）、缺 summary fail-closed。
+  **382 passed**。
 
 ### §19.5 真实生成结果（已批准运行）
 
@@ -1593,10 +1597,46 @@ requests）——单次 3 点采样，证据弱，仅供方向性参考：
   因作者而异、且单次采样噪声大；不视为失败，是诚实的混合观测。
 - 结论定性为**弱证据**：LLM 抽样随机 + 每作者仅 1 次 × 3 档，不足以断言因果。
 
+### §19.5 repeated-sampling 结果（每档 n=3，12 新 fresh 请求）
+
+追加重复样本（`python -m knowledge.generation.controllability repeated`，每档 = 首样本 +
+2 个 fresh，12 新请求，20,799 total tokens），在均值/中位数层面判定趋势是否稳定：
+
+**Austen（n=3）**
+
+| 档 | mean | median | std | min | max |
+|---|---|---|---|---|---|
+| low | 0.172 | 0.159 | 0.020 | 0.157 | 0.200 |
+| medium | 0.216 | 0.194 | 0.038 | 0.185 | 0.270 |
+| high | 0.172 | 0.165 | 0.015 | 0.157 | 0.193 |
+
+- monotonic_on_mean = **否**（non_monotonic）；monotonic_on_median = **否**。
+- **medium 偏高未被重复采样平均掉**：medium 均值 0.216 仍明显高于 low 0.172 ≈ high 0.172。
+  且 medium std 最大（0.038）→ 既偏高又最不稳。
+- effect_direction = decreasing，但 effect_size(low−high) = 0.0006 ≈ 0 → low 与 high 几乎
+  无差，趋势实质是"medium 异常偏高"，而非干净的强度单调。
+
+**Dickens（n=3）**
+
+| 档 | mean | median | std | min | max |
+|---|---|---|---|---|---|
+| low | 0.154 | 0.153 | 0.008 | 0.144 | 0.164 |
+| medium | 0.127 | 0.125 | 0.013 | 0.112 | 0.145 |
+| high | 0.120 | 0.123 | 0.007 | 0.111 | 0.126 |
+
+- monotonic_on_mean = **是**（decreasing）；monotonic_on_median = **是**（decreasing）。
+- **原单调递减趋势在 n=3 后仍成立**；effect_size(low−high) = 0.034，方向稳定。
+
+**结论**：单次实验的结论在 n=3 下**部分稳健**——Dickens 单调递减稳定复现；Austen 的
+non-monotonic 不是单次噪声，而是 medium 档系统性偏高（均值层面真实存在）。三者区间
+仍彼此重叠（low↔medium / medium↔high 均重叠），档间差异量级（~0.03–0.05）与档内散布
+（std ~0.01–0.04）同阶，仍是**小样本弱证据**，不设硬 pass/fail。
+
 ### Non-goals
 
-- §19.5 多轮平均 / 重跑确认（单调性证据强度受限于单次采样，非本次范围）。绝不自动进入
-  真实 LLM 运行、不合并 main、不提 PR。
+- >3 样本的正式统计（n=3 仍小、未做假设检验/功效分析）；控制算法修改；Revision / 文学
+  评价 / 叙事策略重评；段级 drift 接入 planner；自动追加更多样本。绝不自动进入真实 LLM
+  运行、不合并 main、不提 PR。
 
 ---
 

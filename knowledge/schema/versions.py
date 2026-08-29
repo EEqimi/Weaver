@@ -91,3 +91,8 @@ SEGMENT_DRIFT_VERSION = "0.1.0"
 # Phase 9.3：§19.5 生成可控性实验（low/medium/high 强度重生成 + 单调性判定）。
 # 只新增实验编排模块，不改生成/画像/计划缓存；独立版本作产物溯源。
 CONTROLLABILITY_VERSION = "0.1.0"
+
+# Phase 9.3 repeated-sampling：对 §19.5 单次实验追加重复样本（每 cell n=3），在均值/
+# 中位数层面判断 low/medium/high 距离趋势是否稳定。不改 Planner/Compiler/Layer D，
+# 只增编排；独立版本作产物溯源（controllability_repeated_summary/report）。
+CONTROLLABILITY_REPEATED_VERSION = "0.1.0"
