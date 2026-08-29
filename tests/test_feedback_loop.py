@@ -19,12 +19,17 @@ import pytest
 
 from knowledge.evaluation import run as run_mod
 from knowledge.evaluation.schema import (
-    FEEDBACK_ACCEPT, FEEDBACK_CONTINUE, FEEDBACK_NO_EFFECT, FEEDBACK_ROLL_BACK,
-    ActualStyleProfile, ComparisonResult, ContentIntegrityResult, FeatureDeviation,
-    RevisionItem, RevisionPlan, RevisionResult,
+    ASSESSMENT_OBSERVED, DEFAULT_DIMENSION_WEIGHTS, FEEDBACK_ACCEPT,
+    FEEDBACK_CONTINUE, FEEDBACK_NO_EFFECT, FEEDBACK_ROLL_BACK,
+    LITERARY_DIMENSIONS, ActualStyleProfile, ComparisonResult,
+    ContentIntegrityResult, DimensionScore, FeatureDeviation,
+    LiteraryEvaluation, RevisionItem, RevisionPlan, RevisionResult,
 )
 from knowledge.generation.schema import output_hash
-from knowledge.schema.versions import FEEDBACK_LOOP_VERSION
+from knowledge.planning.schema import StylePlan, WritingRequest
+from knowledge.schema.versions import (
+    FEEDBACK_LOOP_VERSION, LITERARY_EVALUATION_SCHEMA_VERSION,
+)
 
 
 def _fake_actual():
@@ -311,3 +316,85 @@ def test_iterations_json_written_with_loop_version(monkeypatch, tmp_path):
     assert [it["iteration"] for it in data["iterations"]] == [1, 2]
     # 紧凑摘要：不内嵌全文 profile 大对象。
     assert "layer_a_statistical" not in data["iterations"][0]
+
+
+# --------------------------------------------------------------------------- #
+# 真实 bug 回归（Request C）：文学评价对象 vs 总分 float 的类型错配
+# --------------------------------------------------------------------------- #
+def _weak_literary_evaluation(weak_dim="language_texture", weak_score=2.0
+                              ) -> LiteraryEvaluation:
+    """一个真实的 LiteraryEvaluation：`language_texture` 弱维度（低于阈值），其余健康。"""
+    dims = {
+        dim_id: DimensionScore(
+            dimension=dim_id, label=label,
+            score=weak_score if dim_id == weak_dim else 7.0,
+            summary="ok", strength="clear", weakness="needs strengthening",
+            evidence=["a quoted line"], assessment_status=ASSESSMENT_OBSERVED,
+            verified_evidence_count=1)
+        for dim_id, label in LITERARY_DIMENSIONS
+    }
+    return LiteraryEvaluation(
+        schema_version=LITERARY_EVALUATION_SCHEMA_VERSION,
+        author_id="austen", passage_id="g1", dimensions=dims,
+        weights=dict(DEFAULT_DIMENSION_WEIGHTS), total_score=6.0,
+        summary="fine", blind=True, evaluator_version="0.1.0")
+
+
+class _LitReturningEvaluator:
+    """文学评价器：每次 evaluate 返回同一个 LiteraryEvaluation 对象。"""
+
+    def __init__(self, evaluation):
+        self.evaluation = evaluation
+        self.calls = 0
+
+    def evaluate(self, *a, **k):
+        self.calls += 1
+        return self.evaluation
+
+
+def test_feedback_loop_threads_evaluation_object_not_float(monkeypatch, tmp_path):
+    """回归（真实验收 bug）：feedback=1 路径 `_run_feedback_loop` 曾把文学**总分 float**
+    （`lit_before` = `eval_before.total_score`）当作 `evaluation=` 传给真实
+    `build_revision_plan`，而后者需要 `LiteraryEvaluation` 对象（访问 `.dimensions`）→
+    `AttributeError: 'float' object has no attribute 'dimensions'`。
+
+    修复后应线程化**完整 LiteraryEvaluation 对象**（非 float），其弱维度产出一条改写项。
+    本测试使用真实 `build_revision_plan`（不 monkeypatch），零 LLM / 零 token。
+    """
+    # 不 monkeypatch build_revision_plan —— 用真实实现，让 .dimensions 访问真正发生。
+    plan = StylePlan(
+        style_plan_id="sp1", schema_version="0.1.0", author_id="austen",
+        source_profile_hash="sh", writing_request={"content": "A quiet scene."})
+    comparison_before = ComparisonResult(author_id="austen", passage_id="g1")
+
+    evaluation = _weak_literary_evaluation()
+    evaluator = _LitReturningEvaluator(evaluation)
+    checker = _RecordingChecker()
+    rewriter = _ScriptedRewriter(["Revised passage text one."])
+
+    monkeypatch.setattr(run_mod, "measure_actual_profile",
+                        lambda text, **kw: _fake_actual())
+    monkeypatch.setattr(run_mod, "compare_target_actual",
+                        lambda plan, profile, actual, thresholds: _cmp_with_n(0))
+
+    loop = run_mod._run_feedback_loop(
+        original_text="Original passage text.",
+        comparison_before=comparison_before,
+        lit_before=evaluation.total_score,          # 决策/护栏用 float
+        eval_before=evaluation,                     # 改写计划用完整对象
+        plan=plan, profile=SimpleNamespace(), request=WritingRequest(
+            content="A quiet scene."),
+        author_id="austen", passage_id="g1", names=[],
+        rewriter=rewriter, checker=checker, evaluator=evaluator,
+        band_thresholds={}, provider=_NoCallProvider(),
+        policy=run_mod.EvaluationPolicy(), max_iterations=1, base=tmp_path)
+
+    # 无 AttributeError 即通过；闭环正常终止（after 0 偏差 → accept）。
+    assert loop["final_outcome"] == FEEDBACK_ACCEPT
+    # 弱维度 language_texture 产出一条 P3 文学改写项 —— 证明真实 .dimensions 被消费，
+    # 而非把 float 当对象（那会抛 AttributeError，根本走不到这里）。
+    rev_items = loop["rounds"][0]["rev_plan"].revision_items
+    assert any(i.target == "language_texture" and i.priority == "P3"
+               and i.category == "language" for i in rev_items)
+    # 文学评价器确实被调用（改写后一次），且 _NoCallProvider 保证零真实 LLM。
+    assert evaluator.calls >= 1

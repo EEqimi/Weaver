@@ -261,6 +261,7 @@ def _run_feedback(base: Path, author_id: str, author_names: list[str],
     loop = _run_feedback_loop(
         original_text=original_text,
         comparison_before=comparison_before, lit_before=lit_before,
+        eval_before=eval_before,
         plan=plan, profile=profile, request=request,
         author_id=author_id, passage_id=passage.generation_id,
         names=author_names, rewriter=rewriter, checker=checker, evaluator=evaluator,

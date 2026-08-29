@@ -327,6 +327,7 @@ def _run_feedback_loop(
     original_text: str,
     comparison_before: ComparisonResult,
     lit_before: float | None,
+    eval_before: LiteraryEvaluation | None = None,
     plan: StylePlan,
     profile: Any,
     request: WritingRequest,
@@ -362,6 +363,7 @@ def _run_feedback_loop(
     current_text = original_text
     current_comparison = comparison_before
     current_literary = lit_before
+    current_eval = eval_before
 
     iteration = 1
     decision: FeedbackDecision | None = None
@@ -394,7 +396,7 @@ def _run_feedback_loop(
 
     while iteration <= max_iterations:
         rev_plan = build_revision_plan(
-            current_comparison, plan, evaluation=current_literary,
+            current_comparison, plan, evaluation=current_eval,
             weak_score_threshold=policy.weak_score_threshold)
 
         # STEP 0：空计划 → no_action（未执行任何改写），停。
@@ -513,6 +515,7 @@ def _run_feedback_loop(
             current_text = rev_result.revised_text
             current_comparison = comparison_after
             current_literary = lit_after
+            current_eval = eval_after
             iteration += 1
             rev_result = None
             integrity = None
@@ -607,6 +610,7 @@ def run_evaluation(data_root_: Path | None = None,
         loop = _run_feedback_loop(
             original_text=passage.generated_text,
             comparison_before=comparison_before, lit_before=lit_before,
+            eval_before=eval_before,
             plan=plan, profile=profile, request=request,
             author_id=author_id, passage_id=passage.generation_id,
             names=names, rewriter=rewriter, checker=checker, evaluator=evaluator,
