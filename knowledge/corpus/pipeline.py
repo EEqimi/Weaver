@@ -94,6 +94,23 @@ def build_work(meta: WorkMetadata, src_path: Path, layout: dict[str, Path]) -> d
     return metadata
 
 
+def build_works(works: list[WorkMetadata] | tuple[WorkMetadata, ...],
+                corpus_root: str | Path | None = None,
+                data_root_: str | Path | None = None) -> dict[str, dict]:
+    """只构建给定作品子集（单作者 onboarding 用），写各自 metadata/qc，返回
+    {work_id: metadata}。确定性、无 LLM、只写 data/（gitignore）。
+    """
+    root = Path(corpus_root) if corpus_root is not None else default_corpus_root()
+    droot = Path(data_root_) if data_root_ is not None else default_data_root()
+    layout = data_layout(droot)
+
+    found = discover(root, works=works)
+    all_metadata: dict[str, dict] = {}
+    for meta in works:
+        all_metadata[meta.work_id] = build_work(meta, found[meta.work_id], layout)
+    return all_metadata
+
+
 def build_corpus(corpus_root: str | Path | None = None,
                  data_root_: str | Path | None = None) -> dict:
     """处理全部语料，写 manifest 与 QC 汇总，返回汇总结构。"""

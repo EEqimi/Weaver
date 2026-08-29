@@ -1640,6 +1640,69 @@ non-monotonic 不是单次噪声，而是 medium 档系统性偏高（均值层�
 
 ---
 
+## Checkpoint — Phase 9.4: Generic Author Onboarding / Corpus Registry
+
+**Status:** COMPLETE（确定性，零 LLM；V0.1 冻结前收尾）
+
+### Goal
+
+V0.1 核心验收：**新增第三位作者不修改 Style Engine 核心分析代码**，只需 author
+manifest + 语料。先做 hard-code audit（先报告再实施），再把语料清单从硬编码 CORPUS
+迁移为数据驱动 manifest registry，提供 onboarding 入口，并用 synthetic 第三作者
+smoke test 证明"manifest → registry → validation → discovery → deterministic
+onboarding → metadata"全链路零核心代码改动。
+
+### Hard-code audit 结论（Category A 保留 vs B 泛化）
+
+- **A（合理保留）**：`calibration/smoke.py` 的 `SMOKE_CHUNKS`（4-chunk 测量系统验证）、
+  `generation/run.py:212` plumbing `author_id="austen"`（spec §四，单次传输验证）、
+  测试 fixture、Phase 8/9 历史产物/报告、`phase8_2.py` 的 austen_02/dickens_02 文案。
+- **B（应泛化，本轮已改）**：`metadata.py` 硬编码 `CORPUS` 元组；
+  `planning/run.py` `AUTHOR_IDS=("austen","dickens")`；`discover.py`/`pipeline.py`
+  遍历 CORPUS；`planning/run.py` / `generation/run.py` / `calibrate.py` 报告表硬编码
+  "Austen|Dickens" 表头与 `g["austen"]/g["dickens"]`。
+- **已泛化（无需改）**：`AuthorStyleProfileSynthesizer`、`synthesize_style_profiles`、
+  `run_consolidation`/`_partition_raw_strategies`、`author_display_names`、
+  `build_calibration_manifest`（本就数据驱动）。
+
+### Implementation
+
+- `knowledge/corpus/manifest.py`（新）：`MANIFEST_SCHEMA_VERSION=0.1.0`、
+  `WorkManifest`/`AuthorManifest`（frozen dataclass + `from_dict` 校验）、
+  `parse_manifest`（schema_version + 必填非空 + author_id/work_id 全局唯一 +
+  role∈{train,held_out}，fail-closed）、`load_manifest_file`（JSON 规范 / YAML 可选）。
+- `manifests/austen_dickens.json`（新，committed）：6 作品作为数据（年份/体裁/角色/
+  含笔误文件名原样保留）。
+- `knowledge/corpus/metadata.py`：`CORPUS = load_corpus()`；新增 `manifest_dir()`（
+  `WEAVER_MANIFEST_DIR` 覆盖）、`load_corpus(manifest_root)`、`author_ids()`、
+  `works_from_manifest()`；`WorkMetadata.year` 放宽为 `int|None`；`TRAIN/HELD_OUT` 与
+  全部 helper（`by_work_id`/`author_display_names`/`by_author_id`/`train_works`/
+  `held_out_works`）向后兼容。
+- `knowledge/corpus/discover.py` + `pipeline.py`：`discover(..., works=...)` 与
+  `build_works(works, ...)` 支持作品子集（单作者 onboarding）。
+- `knowledge/ingestion/`（新包）：`onboarding.py`（`validate_author`/`register_author`/
+  `build_author`/`onboard_author`，状态协议 `INVALID`/`READY_FOR_NEXT_STEP`/
+  `REQUIRES_LLM_APPROVAL`）+ `add_author.py`（CLI）。
+- 泛化：`planning/run.py:AUTHOR_IDS = author_ids()`；`planning/run.py`、`generation/run.py`、
+  `calibrate.py` 报告表按注册作者循环（`author_display_names()` 表头）。
+
+### 铁律
+
+- onboarding 确定性部分复用 corpus 管线（discover→clean→chunk→QC→metadata），零 LLM、
+  零 token、绝不读 `DEEPSEEK_API_KEY`、绝不实例化 provider。
+- 需要 LLM 的后续步骤（采样→Layer A/B/C 特征分析→聚合→策略合并→画像合成）绝不自动
+  执行，返回 `REQUIRES_LLM_APPROVAL`（绝不自动计费）。
+
+### Tests
+
+- `tests/test_onboarding.py`（新，11 tests，零 token）：validate ok / schema INVALID /
+  语料缺失 INVALID；register 落盘 + 冲突 INVALID；build 确定性产物落盘（clean/chunks/
+  metadata/qc）；onboard REQUIRES_LLM_APPROVAL + pending_llm_steps + INVALID 短路；
+  registry 派生第三作者（load_corpus 见 austen+bronte+dickens）；CLI 经 env 端到端 +
+  INVALID 非零退出 + usage error。**393 passed**（was 382，+11）。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

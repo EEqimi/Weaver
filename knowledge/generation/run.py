@@ -448,7 +448,7 @@ def _render_comparison(passages: dict[str, GeneratedPassage],
         f"- **生成参数**: {GENERATION_PARAMETERS.to_dict()}",
         f"- **目标长度**: {TARGET_MIN_WORDS}–{TARGET_MAX_WORDS} words（首轮）",
         "",
-        "## 同一中性写作需求（两位作者相同）",
+        "## 同一中性写作需求（各注册作者相同）",
         "",
         "```text",
         NEUTRAL_REQUEST.content,
@@ -456,33 +456,32 @@ def _render_comparison(passages: dict[str, GeneratedPassage],
         "",
         "## 对照表",
         "",
-        "| 维度 | Austen | Dickens |",
-        "|---|---|---|",
     ]
-    rows: list[tuple[str, str, str]] = [
-        ("style_plan_id", passages["austen"].style_plan_id, passages["dickens"].style_plan_id),
-        ("source_profile_hash", passages["austen"].source_profile_hash,
-         passages["dickens"].source_profile_hash),
-        ("compiled_prompt_hash", passages["austen"].compiled_prompt_hash,
-         passages["dickens"].compiled_prompt_hash),
-        ("generation_id", passages["austen"].generation_id, passages["dickens"].generation_id),
-        ("finish_reason", passages["austen"].finish_reason, passages["dickens"].finish_reason),
-        ("word_count", str(_word_count(passages["austen"].generated_text)),
-         str(_word_count(passages["dickens"].generated_text))),
-        ("char_count", str(len(passages["austen"].generated_text)),
-         str(len(passages["dickens"].generated_text))),
-        ("prompt_tokens", str(passages["austen"].usage.prompt_tokens),
-         str(passages["dickens"].usage.prompt_tokens)),
-        ("completion_tokens", str(passages["austen"].usage.completion_tokens),
-         str(passages["dickens"].usage.completion_tokens)),
-        ("total_tokens", str(passages["austen"].usage.total_tokens),
-         str(passages["dickens"].usage.total_tokens)),
+    _display = author_display_names()
+    header = "| 维度 | " + " | ".join(_display.get(aid, aid) for aid in AUTHOR_IDS) + " |"
+    lines.append(header)
+    lines.append("|" + "---|" * (len(AUTHOR_IDS) + 1))
+    rows: list[list[str]] = []
+    for label, fn in [
+        ("style_plan_id", lambda p: p.style_plan_id),
+        ("source_profile_hash", lambda p: p.source_profile_hash),
+        ("compiled_prompt_hash", lambda p: p.compiled_prompt_hash),
+        ("generation_id", lambda p: p.generation_id),
+        ("finish_reason", lambda p: p.finish_reason),
+        ("word_count", lambda p: str(_word_count(p.generated_text))),
+        ("char_count", lambda p: str(len(p.generated_text))),
+        ("prompt_tokens", lambda p: str(p.usage.prompt_tokens)),
+        ("completion_tokens", lambda p: str(p.usage.completion_tokens)),
+        ("total_tokens", lambda p: str(p.usage.total_tokens)),
         ("fresh_request / cache_hit",
-         f"{passages['austen'].fresh_request} / {passages['austen'].cache_hit}",
-         f"{passages['dickens'].fresh_request} / {passages['dickens'].cache_hit}"),
-    ]
-    for label, a, d in rows:
-        lines.append(f"| {label} | `{a}` | `{d}` |")
+         lambda p: f"{p.fresh_request} / {p.cache_hit}"),
+    ]:
+        row = [label]
+        for aid in AUTHOR_IDS:
+            row.append(fn(passages[aid]))
+        rows.append(row)
+    for row in rows:
+        lines.append("| " + row[0] + " | " + " | ".join(f"`{c}`" for c in row[1:]) + " |")
 
     lines += ["", "## 无作者泄露校验（fail-closed）", ""]
     for aid in AUTHOR_IDS:

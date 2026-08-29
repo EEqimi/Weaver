@@ -24,7 +24,7 @@ from ..analysis.narrative_analyzer import NarrativeAnalyzer
 from ..analysis.strategy_miner import StrategyMiner
 from ..analysis.style_analyzer import LLMFeatureAnalyzer
 from ..config import data_layout, data_root as default_data_root
-from ..corpus.metadata import CORPUS
+from ..corpus.metadata import CORPUS, author_display_names, author_ids
 from ..profiles.aggregation import Aggregator, ChunkProfile
 from ..providers.llm_provider import (
     CacheBackedLLMProvider, DeepSeekProvider, LLMCache, LLMTransportError,
@@ -408,16 +408,21 @@ def _render_markdown(report: dict[str, Any]) -> str:
         "",
         "### 作者画像（LLM 特征均值，type-aware）",
         "",
-        "| feature | austen mean | austen n | dickens mean | dickens n |",
-        "|---|---|---|---|---|",
     ]
+    _authors = author_ids()
+    _display = author_display_names()
+    _cols = []
+    for aid in _authors:
+        _cols.append(f" {_display.get(aid, aid)} mean | {aid} n |")
+    lines.append("| feature |" + "".join(_cols))
+    lines.append("|" + "---|" * (1 + 2 * len(_authors)))
     _features = sorted({
         fid for ap in prof["author_profiles"].values()
         for fid in ap.get("features", {})
     })
     for fid in _features:
         row = [f"| {fid} |"]
-        for aid in ("austen", "dickens"):
+        for aid in _authors:
             ap = prof["author_profiles"].get(aid, {})
             f = ap.get("features", {}).get(fid, {})
             mean = f.get("mean")

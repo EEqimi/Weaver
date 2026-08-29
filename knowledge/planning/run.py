@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import data_root as default_data_root
+from ..corpus.metadata import author_display_names, author_ids
 from ..profiles.style_profile import AuthorStyleProfile
 from ..schema.versions import BAND_SCHEMA_VERSION
 from .bands import (
@@ -24,7 +25,9 @@ from .planner import StylePlanner
 from .schema import WritingRequest
 
 PLANNING_DIRNAME = "planning"
-AUTHOR_IDS = ("austen", "dickens")
+# 作者全集由 corpus registry 派生（非硬编码）。新增作者只需加 manifest + 语料，
+# 规划/生成/评估/标定等下游循环自动纳入，无需改本模块或任何核心分析代码。
+AUTHOR_IDS = author_ids()
 
 # 中性写作需求：同一 brief 给两位作者，观察画像如何产生不同的风格控制。
 NEUTRAL_REQUEST = WritingRequest(
@@ -160,7 +163,7 @@ def _render_comparison(plans: dict[str, Any], prompts: dict[str, CompiledPrompt]
         "# Weaver Style Engine — Style Planner & Prompt Compiler 对比报告（Phase 6.1）",
         "",
         "确定性合成：`True`  无 LLM：`True`  无生成正文：`True`。",
-        "同一中性写作需求分别作用于 Austen / Dickens 画像，产出各自 StylePlan 与编译提示词。",
+        "同一中性写作需求分别作用于各注册作者画像，产出各自 StylePlan 与编译提示词。",
         "语言控制 guidance 由 **TRAIN-only 经验 band 阈值**（Q33/Q67 分位数）派生，非人工绝对值。",
         "",
         "## 中性写作需求（两者相同）",
@@ -172,11 +175,12 @@ def _render_comparison(plans: dict[str, Any], prompts: dict[str, CompiledPrompt]
         "",
     ]
 
+    display = author_display_names()
     for author_id in AUTHOR_IDS:
         plan = plans[author_id]
         prompt = prompts[author_id]
         lines += [
-            f"## {author_id.capitalize()}",
+            f"## {display.get(author_id, author_id)}",
             "",
             f"- style_plan_id：`{plan.style_plan_id}`",
             f"- source_profile_hash：`{plan.source_profile_hash}`",
@@ -215,24 +219,25 @@ def _render_comparison(plans: dict[str, Any], prompts: dict[str, CompiledPrompt]
             "",
         ]
 
+    header = "| 维度 | " + " | ".join(display.get(aid, aid) for aid in AUTHOR_IDS) + " |"
     lines += [
         "## 对比要点（同一 brief，不同画像）",
         "",
-        "| 维度 | Austen | Dickens |",
-        "|---|---|---|",
+        header,
+        "|" + "---|" * (len(AUTHOR_IDS) + 1),
     ]
-    rows: list[tuple[str, str, str]] = []
+    rows: list[list[str]] = []
     # 语言控制 guidance 对比
     for fid in ["dialogue_ratio", "mean_sentence_length", "mean_paragraph_length",
                 "lexical_diversity"]:
-        g = {}
+        row = [fid]
         for aid in AUTHOR_IDS:
-            g[aid] = next(
+            row.append(next(
                 (c.guidance for c in plans[aid].language_controls if c.feature_id == fid),
-                "—")
-        rows.append((fid, g["austen"], g["dickens"]))
-    for label, a, d in rows:
-        lines.append(f"| {label} | {a} | {d} |")
+                "—"))
+        rows.append(row)
+    for row in rows:
+        lines.append("| " + " | ".join(row) + " |")
     lines += [
         "",
         "> 注：上述 guidance 为自然语言描述（TRAIN-only 经验 banding 结果），不含任何原始数值；",

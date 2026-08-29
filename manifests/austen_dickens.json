@@ -1,0 +1,67 @@
+{
+  "schema_version": "0.1.0",
+  "authors": [
+    {
+      "author_id": "austen",
+      "display_name": "Jane Austen",
+      "language": "en",
+      "works": [
+        {
+          "work_id": "pride_and_prejudice",
+          "title": "Pride and Prejudice",
+          "year": 1813,
+          "genre": "novel",
+          "filename": "pride_and_prejudice..txt",
+          "role": "train"
+        },
+        {
+          "work_id": "emma",
+          "title": "Emma",
+          "year": 1815,
+          "genre": "novel",
+          "filename": "emma.txt",
+          "role": "train"
+        },
+        {
+          "work_id": "persuasion",
+          "title": "Persuasion",
+          "year": 1817,
+          "genre": "novel",
+          "filename": "Persuasion.txt",
+          "role": "held_out"
+        }
+      ]
+    },
+    {
+      "author_id": "dickens",
+      "display_name": "Charles Dickens",
+      "language": "en",
+      "works": [
+        {
+          "work_id": "great_expectations",
+          "title": "Great Expectations",
+          "year": 1861,
+          "genre": "bildungsroman",
+          "filename": "Great_Expectations.txt",
+          "role": "train"
+        },
+        {
+          "work_id": "david_copperfield",
+          "title": "David Copperfield",
+          "year": 1850,
+          "genre": "bildungsroman",
+          "filename": "David_Copperfield,txt.txt",
+          "role": "train"
+        },
+        {
+          "work_id": "tale_of_two_cities",
+          "title": "A Tale of Two Cities",
+          "year": 1859,
+          "genre": "historical_novel",
+          "filename": "A_Tale_of_Two_Cities.txt",
+          "role": "held_out"
+        }
+      ]
+    }
+  ]
+}

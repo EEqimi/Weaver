@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 9.2/9.3 — COMPLETE（含 §19.5 真实生成 + repeated-sampling n=3）：§15.4 段级 stylometric 漂移定位 + §19.5 生成可控性实验（low/medium/high 真实 `deepseek-chat` 重生成 + 单调性观测 + 重复采样均值/中位数判定）；382 tests |
-| **Last completed checkpoint** | §19.5 repeated-sampling（每档 n=3，12 新 fresh 请求，20,799 tokens）：Dickens 单调递减 n=3 仍成立（mean 0.154→0.127→0.120）；Austen medium 偏高未被平均掉（mean 0.172→0.216→0.172，仍 non-monotonic）——小样本弱证据、非硬门 |
+| **Current phase** | Phase 9.4 — COMPLETE：Generic Author Onboarding / Corpus Registry（manifest 数据驱动 + 第三作者 synthetic smoke test，零 LLM）；393 tests |
+| **Last completed checkpoint** | Phase 9.4：CORPUS 由 `manifests/*.json` 数据驱动；`author_ids()` 派生作者全集；`knowledge/ingestion/` onboarding API + CLI（`validate/register/build/onboard_author`，状态 `INVALID`/`READY_FOR_NEXT_STEP`/`REQUIRES_LLM_APPROVAL`）；第三作者零核心代码改动 smoke test 通过 |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -149,6 +149,11 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
+- **393 tests passed** (was 382). +11 Phase 9.4 onboarding tests (zero token, zero LLM):
+  manifest schema 校验（合法/缺 role INVALID）、语料缺失 INVALID、register 落盘 + 冲突
+  INVALID、build 确定性产物落盘、onboard REQUIRES_LLM_APPROVAL + pending_llm_steps、
+  registry 派生第三作者（austen+bronte+dickens）、CLI env 端到端 + INVALID 非零退出 +
+  usage error。第三作者 synthetic fixture，非 Austen/Dickens，不读 DEEPSEEK_API_KEY。
 - **267 tests passed** (was 254). +13 Phase 7.1 tests (Dummy provider, zero token):
   同条件不同正文 → 不同 `generation_id`、同 prompt/参数 → 同 `generation_condition_id`、
   缺 plumbing 阻塞正式生成、失败/不匹配 plumbing 阻塞、合法 plumbing 放行、Markdown
@@ -401,8 +406,23 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 结论：单次结论在 n=3 下**部分稳健**（Dickens 复现、Austen medium 系统性偏高非噪声）；但
   三者区间仍两两重叠、档间差异与档内散布同阶，仍是**小样本弱证据**，不设硬 pass/fail。
 
+## Phase 9.4 (Generic Author Onboarding / Corpus Registry) — COMPLETE（确定性，零 LLM）
+- **V0.1 核心验收达成**：新增第三位作者**不修改 Style Engine 核心分析代码**，只需 author
+  manifest + 语料。第三作者 synthetic smoke test（非 Austen/Dickens）全链路零核心代码改动。
+- `knowledge/corpus/manifest.py`（新）：manifest schema（`MANIFEST_SCHEMA_VERSION=0.1.0`，
+  `AuthorManifest`/`WorkManifest` + `parse_manifest`/`load_manifest_file`，JSON 规范 /
+  YAML 可选，校验 fail-closed）。
+- `manifests/austen_dickens.json`（新，committed）：6 作品作为数据；`metadata.py` 的
+  `CORPUS = load_corpus()`，`author_ids()` 派生作者全集，`year` 放宽 `int|None`。
+- `knowledge/ingestion/`（新包）：`validate_author`/`register_author`/`build_author`/
+  `onboard_author`，状态协议 `INVALID`/`READY_FOR_NEXT_STEP`/`REQUIRES_LLM_APPROVAL`；
+  确定性部分（discover→clean→chunk→QC→metadata）复用 corpus 管线、零 LLM；需要 LLM 的
+  后续步骤绝不自动执行（`REQUIRES_LLM_APPROVAL`）。CLI `python -m knowledge.ingestion.add_author`。
+- 泛化：`planning/run.py:AUTHOR_IDS = author_ids()`；规划/生成/标定报告表按注册作者循环。
+- **Phase 9.3 封板**：定性 `PARTIALLY_SUPPORTED`（见下）；不扩大样本、不改控制算法、不改
+  Austen medium 异常；`>3 样本正式统计` 与 `段级 drift 接入 RevisionPlanner` 进 V0.2 backlog。
+- Tests：**393 passed**（+11 第三作者 onboarding，零 token）。
+
 ## Next planned action
-- **STOP，报告，等待人工 review**：Phase 9.2/9.3 已跑完（确定性实现 + §19.5 真实生成 +
-  repeated-sampling n=3）。Austen medium 系统性偏高、Dickens 单调递减 n=3 复现，均为小样本
-  弱证据；可选下一步：>3 样本正式统计或段级漂移接入 planner。绝不自动进入进一步真实 LLM
-  运行、不合并 main、不提 PR。
+- **V0.1 冻结 review 已出：`READY_FOR_V0_1_FREEZE`。STOP，等待人工确认冻结。**
+  不 merge main、不提 PR、不自动进入 V0.2、不运行新作者真实 LLM、不扩大 controllability。
