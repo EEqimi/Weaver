@@ -167,12 +167,41 @@ class OpenAICompatibleProvider:
                 with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
+                # 根因修复：真实 DeepSeek 响应结构若意外（非 object / message 为 null /
+                # content 非字符串），旧代码的 `data.get(...)` / `...get("message", {})`
+                # `.get("content")` 会抛 AttributeError，且不在下方 except 元组里，
+                # 一路裸抛到 UI 显示 "生成失败：AttributeError"。这里 fail-closed 地把
+                # 畸形响应转成明确的 LLMTransportError（被 writer 层捕获并转友好文案），
+                # 而不是让 AttributeError 逃逸。对合法响应逐字节不变。
+                if not isinstance(data, dict):
+                    raise LLMTransportError(
+                        f"LLM 返回非 object 响应（{type(data).__name__}），无法解析生成结果")
                 choices = data.get("choices") or []
-                content = (choices[0].get("message", {}).get("content", "")
-                           if choices else "")
-                finish_reason = (choices[0].get("finish_reason", "")
-                                 if choices else "")
-                usage = data.get("usage") or {}
+                if not isinstance(choices, list):
+                    raise LLMTransportError(
+                        f"LLM 返回的 choices 非 array（{type(choices).__name__}）")
+                content = ""
+                finish_reason = ""
+                if choices:
+                    first = choices[0]
+                    if not isinstance(first, dict):
+                        raise LLMTransportError(
+                            f"LLM 返回的 choices[0] 非 object（{type(first).__name__}）")
+                    message = first.get("message")
+                    if message is not None and not isinstance(message, dict):
+                        raise LLMTransportError(
+                            f"LLM 返回的 message 非 object（{type(message).__name__}）")
+                    if isinstance(message, dict):
+                        c = message.get("content", "")
+                        if c is not None and not isinstance(c, str):
+                            raise LLMTransportError(
+                                f"LLM 返回的 content 非字符串（{type(c).__name__}），"
+                                f"无法解析生成结果")
+                        content = c if isinstance(c, str) else ""
+                    finish_reason = first.get("finish_reason", "")
+                usage = data.get("usage")
+                if not isinstance(usage, dict):
+                    usage = {}
                 self._accumulate_usage(usage)
                 self.n_success += 1
                 return {"content": content or "",

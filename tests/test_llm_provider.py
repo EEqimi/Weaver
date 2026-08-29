@@ -344,6 +344,46 @@ def test_openai_provider_error_detail_non_http():
     assert "KeyError" in detail
 
 
+# ---- 真实 bug 回归（Request C）：畸形生成响应绝不抛裸 AttributeError ----
+def _raw_http_response(raw_body: str) -> mock.MagicMock:
+    """构造一个返回原始（可能是畸形）响应体的 urlopen 上下文管理器。"""
+    resp = mock.MagicMock()
+    resp.read.return_value = raw_body.encode("utf-8")
+    cm = mock.MagicMock()
+    cm.__enter__.return_value = resp
+    return cm
+
+
+@pytest.mark.parametrize("raw_body", [
+    '[1, 2, 3]',                                   # 顶层非 object
+    '"just a string"',                             # 顶层非 object
+    '{"choices": "not-a-list", "usage": {}}',      # choices 非 array
+    '{"choices": [null], "usage": {}}',            # choices[0] 非 object
+    '{"choices": [{"message": {"content": [1, 2]},'  # content 非字符串
+    ' "finish_reason": "stop"}], "usage": {}}',
+])
+def test_openai_provider_malformed_response_raises_transport_error(raw_body):
+    """旧代码对畸形响应会抛裸 AttributeError/TypeError（不在 except 元组里，一路逃逸
+    到 UI 显示 "生成失败：AttributeError"）。修复后改为明确的 LLMTransportError。"""
+    p = OpenAICompatibleProvider(api_key="test-key")
+    with mock.patch("knowledge.providers.llm_provider.urllib.request.urlopen",
+                    return_value=_raw_http_response(raw_body)):
+        with pytest.raises(LLMTransportError):
+            p.complete_with_metadata([{"role": "user", "content": "hi"}])
+
+
+def test_openai_provider_null_message_yields_empty_content_not_attributeerror():
+    """message 为 null 时旧代码 `None.get("content")` 抛 AttributeError；修复后返回
+    空内容，由下游 GeneratedPassage 以 GenerationError 拒绝（绝不裸抛 AttributeError）。"""
+    p = OpenAICompatibleProvider(api_key="test-key")
+    raw = '{"choices": [{"message": null, "finish_reason": "stop"}], "usage": {}}'
+    with mock.patch("knowledge.providers.llm_provider.urllib.request.urlopen",
+                    return_value=_raw_http_response(raw)):
+        out = p.complete_with_metadata([{"role": "user", "content": "hi"}])
+    assert out["content"] == ""
+    assert out["finish_reason"] == "stop"
+
+
 # ---- 具体 provider 预设：DeepSeek（新默认）与 DashScope（保留）----
 def test_deepseek_provider_defaults():
     p = DeepSeekProvider(api_key="sk-test")

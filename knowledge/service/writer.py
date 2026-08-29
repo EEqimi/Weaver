@@ -182,18 +182,20 @@ def generate(author_id: str, request: WritingRequest, *,
     if not provider.is_configured():
         raise WriterError("未配置 LLM provider：请设置 DEEPSEEK_API_KEY 环境变量")
 
-    plan, prompt = _plan_and_prompt(
-        profile, band_thresholds, author_names, request=request)
-    provenance = _provenance(plan, band_thresholds, profile)
-
+    # 整个"规划 → 编译 → 生成 → 组装 passage"是同一失败边界：把已知的生成错误
+    # （GenerationError / LLMTransportError / LLMNotConfiguredError）统一映射为
+    # 用户可读的 WriterError。原代码只包裹 provider.generate，导致 _plan_and_prompt
+    # （prompt 超上限）与 _build_passage（空正文）的 GenerationError 裸抛到 UI。
     try:
+        plan, prompt = _plan_and_prompt(
+            profile, band_thresholds, author_names, request=request)
+        provenance = _provenance(plan, band_thresholds, profile)
         result = provider.generate(prompt.text, GENERATION_PARAMETERS)
+        passage = _build_passage(
+            author_id, plan, prompt, result, provider, GENERATION_PARAMETERS,
+            provenance, experiment_id, fresh_request=True)
     except (GenerationError, LLMTransportError, LLMNotConfiguredError) as e:
         raise WriterError(_friendly_llm_error(e)) from e
-
-    passage = _build_passage(
-        author_id, plan, prompt, result, provider, GENERATION_PARAMETERS,
-        provenance, experiment_id, fresh_request=True)
 
     out: dict[str, Any] = {
         "author_id": author_id,

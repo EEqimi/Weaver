@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import html
 import sys
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -208,6 +209,9 @@ class WriterRequestHandler(BaseHTTPRequestHandler):
             self._send_html(_form_page(list_authors(), error=str(e)), 400)
             return
         except Exception as e:  # noqa: BLE001 — 兜底，绝不向用户泄露内部堆栈/密钥
+            # 浏览器侧只显示异常类型（不泄露内部堆栈/密钥）；终端侧留完整 traceback，
+            # 便于定位真实根因（真实人工验收时正是这里吞掉了 traceback）。
+            traceback.print_exc()
             self._send_html(_form_page(
                 list_authors(), error=f"生成失败：{type(e).__name__}"), 500)
             return

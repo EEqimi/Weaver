@@ -344,3 +344,48 @@ def test_plan_and_prompt_defaults_to_neutral_request(monkeypatch):
     custom = WritingRequest(content="Custom brief.")
     gen_run._plan_and_prompt(profile, {}, author_names=[], request=custom)
     assert seen["request"] is custom                     # 自定义：透传
+
+
+# --------------------------------------------------------------------------- #
+# 10. 真实 bug 回归：空正文 GenerationError → 友好 WriterError（不裸抛）
+# --------------------------------------------------------------------------- #
+def test_empty_generation_raises_friendly_error(monkeypatch, tmp_path):
+    """空正文经真实 `_build_passage`（GeneratedPassage 拒绝空生成）→ 服务层必须把
+    GenerationError 映射为 WriterError，而非让 UI 显示 "生成失败：GenerationError"。
+    """
+    _install_ready(monkeypatch)
+    plan = SimpleNamespace(style_plan_id="sp1", source_profile_hash="sh",
+                           writing_request={"content": "x"})
+    prompt = SimpleNamespace(text="PROMPT", sections=[])
+    monkeypatch.setattr(writer, "_plan_and_prompt",
+                        lambda *a, **k: (plan, prompt))
+
+    provider = DummyGenerationProvider(content="")       # 空正文
+    with pytest.raises(writer.WriterError, match="生成正文为空"):
+        writer.generate("austen", _req(), provider=provider, data_root_=tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# 11. 真实确定性链端到端（真实画像/planner/compiler/_build_passage，零 LLM）
+# --------------------------------------------------------------------------- #
+def test_generate_real_chain_end_to_end():
+    """确定性回归：真实画像 → 真实 StylePlanner → 真实 PromptCompiler → 真实
+    _build_passage（Dummy provider）。验证 Phase 9.5 service adapter 未错误假设既有
+    对象的字段/API（Request C 的首要怀疑点）。data/ 缺失时跳过（已 gitignore）。"""
+    from knowledge.config import data_root
+    base = data_root()
+    profile = base / "analysis" / "style_profiles" / "austen_style_profile.json"
+    if not profile.exists():
+        pytest.skip("真实画像数据缺失（data/ 已 gitignore）")
+
+    content = "A quiet scene by the fire."
+    provider = DummyGenerationProvider(content=content)
+    req = WritingRequest(content=content)
+
+    result = writer.generate("austen", req, provider=provider, data_root_=base)
+
+    assert result["author_id"] == "austen"
+    assert result["generated_text"] == content
+    assert result["word_count"] == len(content.split())
+    assert result["usage"]["total_tokens"] == 300
+    assert result["feedback"] is None
