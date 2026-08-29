@@ -20,6 +20,7 @@
 | `PARTIALLY_SUPPORTED` | 已实现/已验证，但结论部分成立（小样本弱证据或作者间不一致） |
 | `PLANNED` | spec 已定义、尚未实现 |
 | `V0.2 BACKLOG` | 明确推迟到 V0.2（不在 V0.1 冻结范围） |
+| `UNRECOVERED` | 原始内容无法从既有资料可靠恢复；保留编号仅为引用兼容，**不代表 V0.1 存在未完成模块**（非 V0.1 冻结判据） |
 
 ---
 
@@ -61,7 +62,7 @@
 | 九 | 确定性短路（integrity gate，省 token） | `IMPLEMENTED` |
 | 十 | 首轮目标长度（500–800 English words）+ integrity | `IMPLEMENTED` |
 | 十一 | token 节省：跳过昂贵 Layer B/C/Literary 重测 | `IMPLEMENTED` |
-| 十二 | （PLANNED，未在既有产物中单独引用） | `PLANNED` |
+| 十二 | 原始内容不可恢复（未在既有产物中单独引用） | `UNRECOVERED` / NOT PART OF V0.1 FREEZE CRITERIA |
 | 十三 | 段级漂移定位（§15.4 的父节） | `IMPLEMENTED`（Phase 9.2） |
 | 十四 | 决策 CASE 语义 + token 成本保护 + substantive_edit 门 | `IMPLEMENTED` |
 | 十五 | 文体学诊断（§15.1/§15.4：段级 stylometric 漂移定位） | `IMPLEMENTED` |
@@ -70,13 +71,15 @@
 | 十八 | 生成顺序（与 §四 一致） | `IMPLEMENTED` |
 | 十九 | Post-run 审计（只记录+建议，不改核心逻辑） | `IMPLEMENTED` |
 | 二十 | 合规（`max_iterations=1` 单轮） | `IMPLEMENTED` + `VALIDATED` |
-| 二十一 | （PLANNED） | `PLANNED` |
-| 二十二 | （PLANNED） | `PLANNED` |
-| 二十三 | （PLANNED） | `PLANNED` |
+| 二十一 | 原始内容不可恢复 | `UNRECOVERED` / NOT PART OF V0.1 FREEZE CRITERIA |
+| 二十二 | 原始内容不可恢复 | `UNRECOVERED` / NOT PART OF V0.1 FREEZE CRITERIA |
+| 二十三 | 原始内容不可恢复 | `UNRECOVERED` / NOT PART OF V0.1 FREEZE CRITERIA |
 | 二十四 | 收尾（§三–§二十四 全流程串接） | `IMPLEMENTED` |
 
-> 注：§十二、§二十一、§二十二、§二十三在既有代码/文档中未被单独引用，重建时保守
-> 标为 `PLANNED`，不臆造其内容；如需精确文本以原 spec 源为准（若存在）。
+> 注：§十二、§二十一、§二十二、§二十三的原始内容无法从既有代码/文档可靠恢复，
+> 统一标为 `UNRECOVERED`（NOT PART OF V0.1 FREEZE CRITERIA）。**保留这些编号仅为
+> 历史/spec 引用兼容**（代码/DEVLOG 中出现的 §X 引用不被破坏），**不代表 V0.1 存在
+> 未完成模块**——V0.1 冻结判据不包含它们。
 
 ---
 
