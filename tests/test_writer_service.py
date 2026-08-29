@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from knowledge.analysis.base import LLMResponseError
 from knowledge.evaluation.schema import RevisionResult
 from knowledge.generation.provider import DummyGenerationProvider
 from knowledge.planning.schema import WritingRequest
@@ -363,6 +364,30 @@ def test_empty_generation_raises_friendly_error(monkeypatch, tmp_path):
     provider = DummyGenerationProvider(content="")       # 空正文
     with pytest.raises(writer.WriterError, match="生成正文为空"):
         writer.generate("austen", _req(), provider=provider, data_root_=tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# 12. feedback=1 反馈闭环底层 LLM 错误 → 友好 WriterError（不裸抛 500）
+# --------------------------------------------------------------------------- #
+def test_feedback_eval_error_maps_to_friendly_writer_error(monkeypatch, tmp_path):
+    """回归（真实验收第二次）：feedback=1 时改写器/评价器真实 LLM 返回无法解析的 JSON
+    （LLMResponseError，如 402 余额不足 / 模型返回畸形输出）曾在 `_run_feedback` 中
+    裸抛，UI 显示 "生成失败：LLMResponseError"（500）。服务层必须把它映射为友好
+    WriterError（绝不向用户泄露内部堆栈/密钥）。零 LLM / 零 token。
+    """
+    _install_ready(monkeypatch)
+    _install_plan_prompt_passage(monkeypatch, text="Original text.")
+
+    def _boom(base, author_id, author_names, plan, profile, request, passage,
+              band_thresholds, evaluation_provider):
+        raise LLMResponseError("JSON 解析失败: Expecting ',' delimiter")
+
+    monkeypatch.setattr(writer, "_run_feedback", _boom)
+
+    provider = DummyGenerationProvider(content="Original text.")
+    with pytest.raises(writer.WriterError, match="无法解析"):
+        writer.generate("austen", _req(), provider=provider, data_root_=tmp_path,
+                        feedback_iterations=1)
 
 
 # --------------------------------------------------------------------------- #

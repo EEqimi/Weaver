@@ -24,7 +24,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..analysis.base import AnalysisUnavailable, LLMNotConfiguredError
+from ..analysis.base import (
+    AnalysisUnavailable, LLMNotConfiguredError, LLMResponseError,
+)
 from ..config import data_root as default_data_root
 from ..corpus.metadata import author_display_names, author_ids
 from ..evaluation.integrity import ContentIntegrityChecker
@@ -38,6 +40,7 @@ from ..evaluation.run import (
 )
 from ..evaluation.schema import (
     FEEDBACK_ACCEPT,
+    EvalError,
     EvaluationPolicy,
     RevisionResult,
 )
@@ -133,7 +136,11 @@ def _friendly_llm_error(e: Exception) -> str:
     if isinstance(e, LLMNotConfiguredError):
         return "未配置 LLM provider：请设置 DEEPSEEK_API_KEY 环境变量"
     if isinstance(e, LLMTransportError):
-        return f"与 LLM 服务通信失败（网络/认证错误）：{e}"
+        return f"与 LLM 服务通信失败（网络/认证/账户错误）：{e}"
+    if isinstance(e, LLMResponseError):
+        return f"LLM 返回了无法解析的响应（评价/改写失败）：{e}"
+    if isinstance(e, EvalError):
+        return f"反馈评估失败：{e}"
     if isinstance(e, GenerationError):
         return f"生成失败：{e}"
     return f"生成失败：{e}"
@@ -215,9 +222,17 @@ def generate(author_id: str, request: WritingRequest, *,
     }
 
     if feedback_iterations == 1:
-        fb = _run_feedback(
-            base, author_id, author_names, plan, profile, request, passage,
-            band_thresholds, evaluation_provider)
+        # 反馈闭环是额外 API 消耗：其底层错误（评价/改写/完整性检查返回无法解析的
+        # JSON → LLMResponseError、传输失败 → LLMTransportError、泄露守卫/校验 →
+        # EvalError）同样映射为友好 WriterError，绝不裸抛到 UI（否则浏览器显示
+        # "生成失败：LLMResponseError" 而非可读原因）。
+        try:
+            fb = _run_feedback(
+                base, author_id, author_names, plan, profile, request, passage,
+                band_thresholds, evaluation_provider)
+        except (LLMResponseError, EvalError, LLMTransportError,
+                LLMNotConfiguredError) as e:
+            raise WriterError(_friendly_llm_error(e)) from e
         out["feedback"] = fb
         out["generated_text"] = fb["final_text"]
         out["word_count"] = len(fb["final_text"].split())
