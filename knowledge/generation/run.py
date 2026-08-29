@@ -31,6 +31,7 @@ from ..planning.planner import StylePlanner
 from ..planning.run import (
     AUTHOR_IDS, NEUTRAL_REQUEST, _band_thresholds, _load_profile,
 )
+from ..planning.schema import WritingRequest
 from ..providers.llm_provider import DeepSeekProvider
 from ..schema.versions import (
     GENERATION_SCHEMA_VERSION, GENERATION_VERSION, PROMPT_COMPILER_VERSION,
@@ -118,11 +119,16 @@ def _assert_prompt_safe(prompt: Any, author_names: list[str]) -> None:
 
 
 def _plan_and_prompt(profile: Any, band_thresholds: dict[str, Any],
-                     author_names: list[str] | None = None):
-    """画像 → StylePlan → CompiledPrompt（确定性），并 fail-closed 校验无作者泄露。"""
+                     author_names: list[str] | None = None,
+                     request: WritingRequest | None = None):
+    """画像 → StylePlan → CompiledPrompt（确定性），并 fail-closed 校验无作者泄露。
+
+    `request` 缺省为中性写作需求（NEUTRAL_REQUEST，批量生成对比用）；Writer 服务层
+    传入用户自定义 WritingRequest 时沿用同一条规划/编译/泄露守卫路径（向后兼容）。
+    """
     planner = StylePlanner(band_thresholds=band_thresholds)
     compiler = PromptCompiler()
-    plan = planner.plan(profile, NEUTRAL_REQUEST)
+    plan = planner.plan(profile, request or NEUTRAL_REQUEST)
     prompt = compiler.compile(plan)
     _assert_prompt_safe(prompt, author_names or _author_names_for([profile.author_id]))
     if len(prompt.text) > MAX_PROMPT_CHARS_GUARD:

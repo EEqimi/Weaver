@@ -67,7 +67,7 @@
 | 十四 | 决策 CASE 语义 + token 成本保护 + substantive_edit 门 | `IMPLEMENTED` |
 | 十五 | 文体学诊断（§15.1/§15.4：段级 stylometric 漂移定位） | `IMPLEMENTED` |
 | 十六 | 成本预检（真实 LLM 运行前显式批准） | `IMPLEMENTED`（门控流程） |
-| 十七 | 测试契约（§17.1–17.6 逐条测试） | `IMPLEMENTED`（393 tests） |
+| 十七 | 测试契约（§17.1–17.6 逐条测试） | `IMPLEMENTED`（404 tests） |
 | 十八 | 生成顺序（与 §四 一致） | `IMPLEMENTED` |
 | 十九 | Post-run 审计（只记录+建议，不改核心逻辑） | `IMPLEMENTED` |
 | 二十 | 合规（`max_iterations=1` 单轮） | `IMPLEMENTED` + `VALIDATED` |
@@ -143,6 +143,17 @@ dickens_02 accept）。
 强度旋钮 = 语言控制 `activation`（low→weak / medium→medium / high→strong）；重复采样
 每档 n=3（首样本 + 2 fresh）。详见 §4。
 
+### 3.12 最小 Writer UI + 服务层（Phase 9.5）— `IMPLEMENTED`（确定性测试；真实 LLM 未在本轮运行）
+`knowledge/service/writer.py`（共享服务层：`list_authors` / `build_request` / `generate`）
++ `knowledge/service/webapp.py`（stdlib `http.server` Web UI，零第三方前端框架）。
+UI 输入 → `WritingRequest` → 既有 StylePlanner → 既有 PromptCompiler → 既有 Generation
+provider（真实 LLM，DeepSeek）→ 可选既有 Evaluation/Revision 单轮反馈（`feedback_iterations`
+∈ {0,1}）→ UI 输出。作者下拉框来自 Generic Author Registry（`author_ids()` /
+`author_display_names()`），只有已建成 AuthorStyleProfile 的作者可生成；未就绪作者显示
+"Not ready — author profile has not been built" 并禁止生成。绝不硬编码 Austen/Dickens、
+绝不打印/暴露密钥、绝不提交生成正文（会话内存）、不新增 HTTP client。运行：
+`python -m knowledge.service.webapp [--port 8765]`。
+
 ---
 
 ## 4. Phase 9.3 最终结论 — `PARTIALLY_SUPPORTED`
@@ -183,6 +194,7 @@ Austen medium 异常；`>3 样本正式统计` 与 `段级 drift 接入 Revision
 | 盲测 / P0 保护 / stylometric 仅诊断 / 密钥只读 | ✅（测试断言覆盖） |
 | 需 LLM 的步骤返回 `READY_FOR_NEXT_STEP`/`REQUIRES_LLM_APPROVAL`/`INVALID`，绝不自动计费 | ✅ |
 | Phase 9.3 如实记录 `PARTIALLY_SUPPORTED` | ✅（§4） |
-| 完整测试通过 | ✅ 393 passed（含 11 新 onboarding 测试，零 LLM） |
+| 最小 Writer UI（作者来自 registry、真实 LLM 生成、可选单轮反馈、零新依赖） | ✅ `IMPLEMENTED`（§3.12） |
+| 完整测试通过 | ✅ 404 passed（含 11 新 onboarding + 11 新 Writer 服务层测试，零 LLM） |
 
 **冻结判定：`READY_FOR_V0_1_FREEZE`** —— 见最终报告。

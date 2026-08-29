@@ -1703,6 +1703,62 @@ onboarding → metadata"全链路零核心代码改动。
 
 ---
 
+## Phase 9.5 (Minimal Writer UI + Service Layer) — COMPLETE（确定性测试；真实 LLM 未运行）
+
+Request C：V0.1 冻结前补一个最小可用 Writer UI，让用户无需手动跑 Python runner 即可生成。
+
+### 决策
+
+- 仓库 stdlib-first（无 Streamlit/Flask/requests），故用 **stdlib `http.server`** 做极简
+  Web UI，**不引入任何第三方前端框架**（用户明确"若项目未用 Streamlit 则不引入新框架"）。
+- 业务逻辑集中在共享服务层 `knowledge/service/writer.py`，未来 CLI/Streamlit/Web API 均
+  复用同一入口；UI（`webapp.py`）只收集表单 + 渲染结果，**绝不重实现** StylePlanner /
+  PromptCompiler / Generation / Evaluation / Revision / Feedback Loop。
+
+### Implementation
+
+- `knowledge/service/writer.py`（新）：
+  - `list_authors()`：作者全集来自 Generic Author Registry（`author_ids()` /
+    `author_display_names()`），非硬编码；`ready` = 画像文件存在且能通过 reproducibility
+    hash 校验加载；未就绪 `reason="author profile has not been built"`。
+  - `build_request()`：UI 输入 → `WritingRequest`（复用 planning/schema.py 字段与校验）。
+  - `generate()`：`_plan_and_prompt(request=...)`（沿用泄露守卫 A/B）→
+    `provider.generate(prompt.text, GENERATION_PARAMETERS)`（真实 DeepSeek，复用既有
+    `build_generation_provider`，绝不另写 HTTP client）→ `_build_passage` → 可选单轮反馈。
+  - 反馈（`feedback_iterations ∈ {0,1}`，Phase 9.1 多轮仍留在引擎）：复用
+    `measure_actual_profile` / `compare_target_actual` / `_run_feedback_loop`
+    （`max_iterations=1`）；accept → 采纳改写，roll_back / no_effect / no_action → 保留原文。
+  - 错误映射：缺 `DEEPSEEK_API_KEY` / 传输失败（401 等）/ 生成失败 → 用户可读
+    `WriterError`，消息**绝不携带密钥或请求体**；返回 dict 不含任何密钥字段；生成正文
+    仅返回内存、不落盘（会话内）。
+- `knowledge/service/webapp.py`（新，stdlib `http.server`）：表单（作者下拉框来自
+  `list_authors()`，not-ready 禁用并显示 "Not ready — author profile has not been built"；
+  content / desired_length / target_words / pov / constraints / feedback 复选）→ POST
+  `/generate` → 渲染结果 + 下载 `.txt`（会话内存 `_RESULTS`，进程退出即消失，绝不提交 Git）。
+  运行：`python -m knowledge.service.webapp [--port 8765]`。
+- `knowledge/service/__init__.py`（新）：导出 `list_authors`/`build_request`/`generate`/
+  `WriterError`/`WRITER_EXPERIMENT_ID`。
+- `knowledge/generation/run.py`：`_plan_and_prompt` 新增向后兼容 `request: WritingRequest |
+  None = None` 参数（缺省 `NEUTRAL_REQUEST`），Writer 传入自定义 request 复用同一
+  规划/编译/泄露守卫路径（批量生成对比行为不变）。
+
+### 铁律
+
+- Generate = 真实 LLM 调用（DeepSeek）；feedback 为额外 API 消耗（UI 保守只用 0/1）。
+- 绝不硬编码 Austen/Dickens；绝不打印/暴露/保存/提交 `DEEPSEEK_API_KEY`；绝不提交生成正文。
+- 绝不重实现核心模块；不新增第三方依赖（零新依赖）。
+
+### Tests
+
+- `tests/test_writer_service.py`（新，11 tests，Dummy/fake，零 token、零真实 LLM）：
+  ① 作者下拉框来自 registry；② 未就绪作者不可生成；③ WritingRequest 构造；④ 服务层复用
+  planner 并调用生成 provider（自定义 request 透传）；⑤ feedback=0 不进评价/改写；
+  ⑥ feedback=1 进既有闭环（max_iterations=1，accept 采纳改写）；⑦ API 失败/缺 key →
+  用户可读错误；⑧ UI/服务层绝不暴露 API key；⑨ `_plan_and_prompt` 缺省仍用
+  NEUTRAL_REQUEST（Austen/Dickens 生成链不回归）。**404 passed**（was 393，+11）。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

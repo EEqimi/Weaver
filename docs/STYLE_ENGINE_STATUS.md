@@ -6,7 +6,7 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 9.4 — COMPLETE：Generic Author Onboarding / Corpus Registry（manifest 数据驱动 + 第三作者 synthetic smoke test，零 LLM）；393 tests |
+| **Current phase** | Phase 9.5 — COMPLETE：最小 Writer UI + 服务层（`knowledge/service/`，作者来自 registry、真实 LLM 生成、可选单轮反馈、零新依赖）；404 tests |
 | **Last completed checkpoint** | Phase 9.4：CORPUS 由 `manifests/*.json` 数据驱动；`author_ids()` 派生作者全集；`knowledge/ingestion/` onboarding API + CLI（`validate/register/build/onboard_author`，状态 `INVALID`/`READY_FOR_NEXT_STEP`/`REQUIRES_LLM_APPROVAL`）；第三作者零核心代码改动 smoke test 通过 |
 | **Current branch** | `feature/style-engine-v0.1` |
 
@@ -149,6 +149,11 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 6 works total; raw text outside the repo (`wensigongfang/text/`), `data/` gitignored.
 
 ## Current test status
+- **404 tests passed** (was 393). +11 Phase 9.5 Writer 服务层/UI 测试（Dummy/fake，零 token）：
+  作者下拉框来自 registry（非硬编码）、未就绪作者不可生成、WritingRequest 构造、服务层
+  复用 planner 并调用生成 provider、feedback=0 不进评价/改写、feedback=1 进既有闭环
+  （max_iterations=1）、API 失败/缺 key → 用户可读错误、UI/服务层绝不暴露 API key、
+  `_plan_and_prompt` 缺省仍用 NEUTRAL_REQUEST（生成链不回归）。
 - **393 tests passed** (was 382). +11 Phase 9.4 onboarding tests (zero token, zero LLM):
   manifest schema 校验（合法/缺 role INVALID）、语料缺失 INVALID、register 落盘 + 冲突
   INVALID、build 确定性产物落盘、onboard REQUIRES_LLM_APPROVAL + pending_llm_steps、
@@ -422,6 +427,29 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - **Phase 9.3 封板**：定性 `PARTIALLY_SUPPORTED`（见下）；不扩大样本、不改控制算法、不改
   Austen medium 异常；`>3 样本正式统计` 与 `段级 drift 接入 RevisionPlanner` 进 V0.2 backlog。
 - Tests：**393 passed**（+11 第三作者 onboarding，零 token）。
+
+## Phase 9.5 (Minimal Writer UI + Service Layer) — COMPLETE（确定性测试；真实 LLM 未运行）
+- **目标**：让用户无需手动跑 Python runner 即可生成；复用既有核心模块、不重实现、不破坏
+  V0.1 核心 API、不新增第三方前端框架（仓库 stdlib-first，无 Streamlit/Flask/requests）。
+- `knowledge/service/writer.py`（新，共享服务层）：
+  - `list_authors()`：作者全集来自 Generic Author Registry（`author_ids()` /
+    `author_display_names()`），非硬编码；`ready` 判定 = 画像文件存在且可加载
+    （reproducibility hash 校验）；未就绪 `reason="author profile has not been built"`。
+  - `build_request()`：UI 输入 → `WritingRequest`（复用 planning/schema.py 校验）。
+  - `generate()`：`_plan_and_prompt(request=...)`（沿用泄露守卫 A/B）→
+    `provider.generate(prompt.text, GENERATION_PARAMETERS)`（真实 DeepSeek，绝不另写
+    HTTP client）→ `_build_passage` → 可选单轮反馈（`feedback_iterations ∈ {0,1}`，复用
+    `measure_actual_profile` / `compare_target_actual` / `_run_feedback_loop`，`max_iterations=1`）。
+  - 错误映射：缺 `DEEPSEEK_API_KEY` / 传输失败 / 生成失败 → 用户可读 `WriterError`
+    （绝不携带密钥/请求体）；返回 dict 不含任何密钥字段；生成正文仅返回内存、不落盘。
+- `knowledge/service/webapp.py`（新，stdlib `http.server` Web UI）：表单（作者下拉框来自
+  `list_authors()`，not-ready 禁用并显示 "Not ready — author profile has not been built"；
+  content / desired_length / target_words / pov / constraints / feedback 复选）→ POST
+  `/generate` → 渲染结果 + 下载 .txt（会话内存 `_RESULTS`，绝不提交 Git）。
+  **运行**：`python -m knowledge.service.webapp [--port 8765]`。
+- `knowledge/generation/run.py`：`_plan_and_prompt` 新增向后兼容 `request` 参数
+  （缺省 `NEUTRAL_REQUEST`），Writer 传入自定义 `WritingRequest` 复用同一规划/编译/守卫路径。
+- Tests：**404 passed**（+11，Dummy/fake，零 token、零真实 LLM）。
 
 ## Next planned action
 - **V0.1 冻结 review 已出：`READY_FOR_V0_1_FREEZE`。STOP，等待人工确认冻结。**
