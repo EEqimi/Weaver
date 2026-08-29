@@ -1505,6 +1505,85 @@ Phase 8.2 的 `run_evaluation` 是单次 if/else 决策：`decide_feedback_outco
 
 ---
 
+## Checkpoint — Phase 9.2: Segment-Level Stylometric Drift Localization（spec §15.4，确定性）
+
+### Goal
+
+Phase 8 的 `_layer_d_diagnostic` 只对整段正文算**一个**到作者质心的余弦距离，无法回答
+"**哪一段**最偏离作者指纹"。本增量把 Layer D 距离下探到**句子粒度**，产出按偏离度降序的
+**漂移图（drift map）**，供后续"真段级编辑定位"消费。纯确定性，无 LLM。
+
+### 设计
+
+- `_refit_layer_d(base, author_id)`：把"重拟合 + feature_names 严格比对（fail-closed）+
+  读 centroid"抽出，整段/段级共享**同一次**重拟合（避免重复 fit）。
+- `_segment_drift(text, vec, centroid, *, min_tokens=3)`：复用 `text_utils.sentences` 逐句
+  （游标顺序匹配回原文，得 `char_start`/`char_end`）+ `text_utils.paragraphs` 回填
+  `paragraph_index`；非跳过句 `vec.transform` 批量向量化 → 每句 `cosine_distance` 到质心，
+  降序返回。过短句（<3 词）标 `skipped`（短文本相对频率稀疏、余弦噪声过大）。
+- `_layer_d_diagnostic` 返回值新增 `segment_drift`（**加法**字段；`layer_d_stylometric` 是
+  dict，不 bump schema）。整段 `cosine_distance` 行为不变（既有测试全绿）。
+- 新增公开 `stylometric_distance(text, author_id, base)`（只做整段距离，供 §19.5 复用）。
+
+### 铁律
+
+- 漂移图是段内**相对排序**、仅诊断，绝不生成改写指令；短段距离噪声大于整段（已注明）。
+- 失败闭锁不变：feature_names 不匹配仍抛 `EvalError`。
+- 新增 `SEGMENT_DRIFT_VERSION = "0.1.0"`（独立，不 bump STYLOMETRY/EVALUATION 版本）。
+
+### Tests
+
+- `tests/test_evaluation.py` +3：segment_drift 存在 + 降序 + 字段 + 版本、过短句 skipped、
+  `stylometric_distance` 与 `_layer_d_diagnostic` 一致。**378 passed**（零 token）。
+
+### Non-goals
+
+- 把漂移图接入改写 planner 做段级目标编辑（仍整段最小编辑；漂移图仅产出 + 持久化）。
+
+---
+
+## Checkpoint — Phase 9.3: Generation Controllability（spec §19.5，确定性 harness）
+
+### Goal
+
+验证同一中性 brief 以 low/medium/high 三档风格强度重生成时，测得的 Layer D 余弦距离是否随
+强度**单调递减**（强度越高 → 越贴近作者指纹）。真实生成需真实 LLM；本增量只交付 harness +
+确定性测试，真实运行门控在 §十六 成本预检 + 显式批准之后。
+
+### 设计
+
+- 强度旋钮 = 语言控制 `activation`（compiler `_ACTIVATION_PREFIX` 唯一带强度措辞的层）：
+  low→weak / medium→medium / high→strong。叙事/策略无强度措辞，不动。
+- `knowledge/generation/controllability.py`（新）：
+  - `apply_intensity(plan, intensity)`：深拷贝后统一重标 `language_controls[].activation`，
+    `reason` 追加溯源，`make_intensity_plan_id(plan.style_plan_id, intensity)` 重算互异
+    确定性 id；reference/suppressed/narrative/strategy 原样。
+  - `check_monotonic(distances, eps)`：low≥medium≥high 容差判定，**报告观测非硬门**。
+  - `run_controllability(...)`：镜像 `run_generation`——plumbing gate + 泄露/预算守卫 +
+    `_build_passage` 复用 + `stylometric_distance` 测量；落盘 `{author}_{intensity}_*` +
+    `controllability_summary/report`。
+- `knowledge/planning/schema.py` 新增 `make_intensity_plan_id`；新增
+  `CONTROLLABILITY_VERSION = "0.1.0"`（独立）。
+
+### 铁律
+
+- 同一 WritingRequest / 模型 / 生成参数；唯一变量是强度覆写后的风格控制。
+- prompt 绝不含作者名 / 模仿令牌（`assert_no_author_identity` / `assert_no_imitation_instruction`
+  fail-closed）；复用 plumbing gate；密钥只读；独立 experiment_id / 无缓存。
+
+### Tests
+
+- `tests/test_controllability.py`（新，7 tests，零 token）：apply_intensity 重标 + 互异 id +
+  原 plan 不动 + 拒绝未知强度；强度措辞前缀 + 泄露守卫；check_monotonic 递减/非单调/平坦/
+  容差；run_controllability 编排（3 passages/作者、产物落盘、单调判定、provider 零真实调用）。
+  **378 passed**。
+
+### Non-goals
+
+- §19.5 真实生成运行（等批准 + 成本预检）。绝不自动进入真实 LLM 运行、不合并 main、不提 PR。
+
+---
+
 ## Workflow (going forward)
 
 1. Implement → 2. run tests → 3. run experiment if applicable → 4. inspect git

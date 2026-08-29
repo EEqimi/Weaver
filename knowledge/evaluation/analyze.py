@@ -30,13 +30,14 @@ from ..analysis.statistical_analyzer import StatisticalAnalyzer
 from ..analysis.strategy_miner import StrategyMiner
 from ..analysis.style_analyzer import LLMFeatureAnalyzer
 from ..analysis.base import AnalysisUnavailable
+from ..analysis.text_utils import paragraphs, sentences, tokens
 from ..config import data_layout, data_root as default_data_root
 from ..generation.schema import output_hash
 from ..profiles.style_profile import AuthorStyleProfile
 from ..providers.llm_provider import LLMProvider
 from ..schema.feature_registry import build_default_registry
 from ..schema.strategy_schema import CreativeStrategy
-from ..schema.versions import EVALUATION_SCHEMA_VERSION
+from ..schema.versions import EVALUATION_SCHEMA_VERSION, SEGMENT_DRIFT_VERSION
 from ..strategies.registry import StrategyRegistry
 from ..stylometry.delta import cosine_distance
 from ..stylometry.extract import StylometricVectorizer
@@ -71,12 +72,14 @@ def _author_strategy_registry(profile: AuthorStyleProfile) -> StrategyRegistry:
     return reg
 
 
-def _layer_d_diagnostic(text: str, author_id: str,
-                        base: Path) -> dict[str, Any]:
-    """Layer D：在 TRAIN chunk 上重拟合向量器，算正文到作者质心的余弦距离。
+def _refit_layer_d(base: Path, author_id: str) -> tuple[
+        StylometricVectorizer, np.ndarray, list[str], int]:
+    """在 TRAIN chunk 上重拟合 Layer D 向量器 + 读回作者质心。
 
     fail-closed：重拟合的 feature_names 必须与持久化 `stylometry/index.json` 完全
-    一致，否则抛 EvalError（绝不产生可能错位对齐的距离值）。
+    一致，否则抛 EvalError（绝不产生可能错位对齐的距离值）。返回
+    (vec, centroid, train_work_ids, n_train_chunks)。整段与段级测量共享**同一次**
+    重拟合（重拟合只做一次，避免段级定位时重复 fit）。
     """
     stylo_dir = base / "analysis" / "stylometry"
     index_path = stylo_dir / "index.json"
@@ -110,16 +113,143 @@ def _layer_d_diagnostic(text: str, author_id: str,
             f"拒绝产生错位对齐的距离（fail-closed）")
 
     centroid = np.asarray(author_target["centroid"], dtype=float)
-    vector = np.asarray(vec.transform([text]), dtype=float)[0]
-    dist = cosine_distance(vector, centroid)
+    return vec, centroid, train_work_ids, len(texts)
+
+
+# 段级定位（spec §15.4）——句子为最小确定性单元；过短句不参与排序（噪声过大）。
+_MIN_SEGMENT_TOKENS = 3
+_SEGMENT_PREVIEW_CHARS = 60
+
+
+def _sentence_spans(text: str) -> list[dict[str, Any]]:
+    """按 text_utils.sentences 的句界切分，记录每句在原文的字符跨度。
+
+    复用 `sentences()` 保证句界口径唯一，再用游标顺序匹配回原文，得到 char_start/
+    char_end（供下游"真段级编辑定位"）。顺序匹配避免同一句文本多处出现时的歧义。
+    """
+    spans: list[dict[str, Any]] = []
+    cursor = 0
+    for s in sentences(text):
+        start = text.index(s, cursor)
+        spans.append({"text": s, "char_start": start, "char_end": start + len(s)})
+        cursor = start + len(s)
+    return spans
+
+
+def _paragraph_spans(text: str) -> list[tuple[int, int]]:
+    """每段（\\n\\n 为界，与 text_utils.paragraphs 一致）的字符跨度。"""
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for p in paragraphs(text):
+        start = text.index(p, cursor)
+        spans.append((start, start + len(p)))
+        cursor = start + len(p)
+    return spans
+
+
+def _paragraph_index_for(char_start: int,
+                         par_spans: list[tuple[int, int]]) -> int:
+    """句子起始字符偏移所属段落索引（无段落/不匹配时为 -1）。"""
+    for i, (s, e) in enumerate(par_spans):
+        if s <= char_start < e:
+            return i
+    return -1
+
+
+def _segment_drift(text: str, vec: StylometricVectorizer,
+                   centroid: np.ndarray, *,
+                   min_tokens: int = _MIN_SEGMENT_TOKENS) -> dict[str, Any]:
+    """段级 stylometric 漂移定位（spec §15.4）：逐句算到作者质心的余弦距离。
+
+    段粒度 = 句子；每句记录原文字符跨度 + 所属段落。过短句（< min_tokens 词）不参与
+    排序（标 skipped）——短文本相对频率稀疏、余弦距离噪声过大。漂移图是段内**相对
+    排序**、仅诊断，绝不生成改写指令。
+    """
+    par_spans = _paragraph_spans(text)
+    sent_spans = _sentence_spans(text)
+
+    kept_idx: list[int] = []
+    skipped: list[dict[str, Any]] = []
+    kept_texts: list[str] = []
+    for i, s in enumerate(sent_spans):
+        n_tok = len(tokens(s["text"]))
+        rec = {
+            "segment_index": i,
+            "char_start": s["char_start"],
+            "char_end": s["char_end"],
+            "paragraph_index": _paragraph_index_for(s["char_start"], par_spans),
+            "n_tokens": n_tok,
+            "text_preview": s["text"][:_SEGMENT_PREVIEW_CHARS],
+        }
+        if n_tok < min_tokens:
+            skipped.append({**rec, "reason": "too_short"})
+        else:
+            kept_idx.append(i)
+            kept_texts.append(s["text"])
+
+    distances: list[float] = []
+    if kept_texts:
+        kept_vecs = np.asarray(vec.transform(kept_texts), dtype=float)
+        distances = [cosine_distance(kept_vecs[k], centroid)
+                     for k in range(len(kept_texts))]
+
+    ordered: list[dict[str, Any]] = []
+    for k in sorted(range(len(kept_idx)), key=lambda k: distances[k], reverse=True):
+        i = kept_idx[k]
+        s = sent_spans[i]
+        ordered.append({
+            "segment_index": i,
+            "char_start": s["char_start"],
+            "char_end": s["char_end"],
+            "paragraph_index": _paragraph_index_for(s["char_start"], par_spans),
+            "n_tokens": len(tokens(s["text"])),
+            "cosine_distance": round(distances[k], 8),
+            "text_preview": s["text"][:_SEGMENT_PREVIEW_CHARS],
+        })
+
+    whole = np.asarray(vec.transform([text]), dtype=float)[0]
     return {
-        "cosine_distance": round(dist, 8),
+        "segments": ordered,
+        "skipped": skipped,
+        "whole_passage_distance": round(cosine_distance(whole, centroid), 8),
+        "min_tokens": min_tokens,
+        "n_segments": len(sent_spans),
+        "n_skipped": len(skipped),
+        "version": SEGMENT_DRIFT_VERSION,
+        "note": ("段级 stylometric 漂移仅作生成后诊断（段内相对排序），绝不生成改写指令；"
+                 "短段余弦距离噪声大于整段"),
+    }
+
+
+def _layer_d_diagnostic(text: str, author_id: str,
+                        base: Path) -> dict[str, Any]:
+    """Layer D：整段余弦距离 + 段级漂移图（spec §15.4）。
+
+    fail-closed：重拟合的 feature_names 必须与持久化 `stylometry/index.json` 完全
+    一致，否则抛 EvalError（绝不产生可能错位对齐的距离值）。整段距离行为不变，新增
+    `segment_drift`（加法字段，仅诊断）。
+    """
+    vec, centroid, train_work_ids, n_train_chunks = _refit_layer_d(base, author_id)
+    drift = _segment_drift(text, vec, centroid)
+    return {
+        "cosine_distance": drift["whole_passage_distance"],
         "n_features": int(len(vec.feature_names_)),
         "feature_names_match": True,
         "train_work_ids": train_work_ids,
-        "n_train_chunks": len(texts),
+        "n_train_chunks": n_train_chunks,
+        "segment_drift": drift,
         "note": ("stylometric 指纹仅作生成后相似度诊断，绝不生成改写指令"),
     }
+
+
+def stylometric_distance(text: str, author_id: str, base: Path) -> float:
+    """公开薄封装：整段正文到作者质心的余弦距离（供 §19.5 等测量复用）。
+
+    只做重拟合 + 整段 transform（不算段级漂移图），避免无关开销。
+    """
+    vec, centroid, _train_work_ids, _n = _refit_layer_d(base, author_id)
+    vector = np.asarray(vec.transform([text]), dtype=float)[0]
+    return round(cosine_distance(vector, centroid), 8)
 
 
 def measure_actual_profile(

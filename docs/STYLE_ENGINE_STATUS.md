@@ -6,8 +6,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 | Field | Value |
 |---|---|
-| **Current phase** | Phase 9.1 (Multi-Round Feedback Loop) — COMPLETE（确定性实现，未运行真实 LLM）：`run_evaluation` 从单次决策重构为有界多轮闭环，`continue` 真正迭代 revise→measure→decide，`roll_back` 保留 best-so-far；368 tests |
-| **Last completed checkpoint** | Phase 9.1 确定性实现：多轮反馈闭环 + 逐轮 `_iter{N}` 产物 + `{author}_iterations.json` + `FEEDBACK_LOOP_VERSION`；7 个新多轮测试（continue→accept / 回归回滚 best-so-far / max_iterations 界 / 中途 no_effect / 完整性每轮对照原文），零真实 LLM；368 tests |
+| **Current phase** | Phase 9.2/9.3 — COMPLETE（确定性实现，未运行真实 LLM）：§15.4 段级 stylometric 漂移定位（逐句余弦距离漂移图）+ §19.5 生成可控性 harness（low/medium/high 强度覆写 + 单调性判定）；378 tests |
+| **Last completed checkpoint** | Phase 9.2/9.3 确定性实现：`_layer_d_diagnostic` 新增 `segment_drift`（段级漂移图，诊断-only）+ `stylometric_distance`；新建 `knowledge/generation/controllability.py`（`apply_intensity`/`check_monotonic`/`run_controllability`）；+10 测试（3 段级 + 7 可控性），零真实 LLM；378 tests |
 | **Current branch** | `feature/style-engine-v0.1` |
 
 ## What is functional
@@ -35,8 +35,8 @@ Short current-state snapshot (≈1–2 min read). History lives in
 
 ## What is not implemented yet
 - Full-corpus LLM feature extraction (only the 40-chunk calibration sample has LLM features).
-- Phase 9 and beyond (multi-round revision loop `max_iterations > 2`; segment-level
-  stylometric drift localization spec §15.4; §19.5 generation-controllability experiment).
+- §19.5 真实生成运行（harness 已就绪，但真实 LLM 运行门控在 §十六 成本预检 + 显式批准之后）。
+- 把段级漂移图**接入改写 planner 做段级目标编辑**（漂移图本次仅产出 + 持久化，仍整段最小编辑）。
 - Multi-author style mixing (the `conflicts` / `resolution_required` structure is reserved in
   `StylePlan.planner_metadata`, currently empty for single-author planning).
 - NlpAnalyzer (POS) features — NLTK intentionally not installed.
@@ -359,7 +359,30 @@ Short current-state snapshot (≈1–2 min read). History lives in
 - 新增 `FEEDBACK_LOOP_VERSION=0.1.0`（独立版本，绝不 bump 任何 cache 相关版本）。
 - Tests：**368 passed**（+7 多轮确定性，零 token，零真实 LLM）。
 
+## Phase 9.2 (Segment-Level Stylometric Drift Localization, §15.4) — COMPLETE（确定性）
+- `knowledge/evaluation/analyze.py`：抽 `_refit_layer_d`（重拟合 + fail-closed feature_names
+  比对，整段/段级共享**同一次**重拟合）；新增 `_segment_drift`（句子粒度逐句余弦距离到作者
+  质心，降序漂移图）与公开 `stylometric_distance`（整段距离薄封装）。
+- `_layer_d_diagnostic` 返回值**新增** `segment_drift` 键（加法字段，`layer_d_stylometric`
+  已是 dict，不 bump 任何 schema）。漂移图含每句 `segment_index`/`char_start`/`char_end`/
+  `paragraph_index`/`n_tokens`/`cosine_distance`/`text_preview`，过短句（<3 词）标
+  `skipped`（短文本余弦噪声过大）。
+- 铁律不变：stylometric 指纹仅诊断，绝不生成改写指令；短段距离是段内**相对排序**。
+- 新增 `SEGMENT_DRIFT_VERSION=0.1.0`（独立，不 bump STYLOMETRY/EVALUATION 版本）。
+
+## Phase 9.3 (Generation Controllability, §19.5) — COMPLETE（确定性 harness，未运行真实 LLM）
+- 新建 `knowledge/generation/controllability.py`：`apply_intensity`（纯函数，把已激活语言
+  控制统一重标 low→weak / medium→medium / high→strong，互异确定性 plan id 经
+  `make_intensity_plan_id`）、`check_monotonic`（low≥medium≥high 容差判定，**报告观测非
+  硬门**）、`run_controllability`（镜像 `run_generation`：plumbing gate + 泄露/预算守卫 +
+  `_build_passage` 复用 + `stylometric_distance` 测量，落盘 `{author}_{intensity}_*` +
+  `controllability_summary/report`）。
+- 强度旋钮 = 语言控制 `activation`（compiler `_ACTIVATION_PREFIX` 唯一带强度措辞的层）。
+- `knowledge/planning/schema.py` 新增 `make_intensity_plan_id`；新增
+  `CONTROLLABILITY_VERSION=0.1.0`（独立）。
+- Tests：**378 passed**（+10：3 段级 + 7 可控性，零 token，零真实 LLM）。
+
 ## Next planned action
-- **STOP，报告，等待人工 review**：多轮反馈闭环（Phase 9.1）确定性实现已跑完（368 tests，
-  零真实 LLM）。剩余两个 Phase 9 工作流（段级 stylometric 漂移定位 §15.4、§19.5 生成可控性
-  实验）待后续；绝不自动进入真实 LLM 运行、不合并 main、不提 PR。
+- **STOP，报告，等待人工 review**：Phase 9.2/9.3 确定性实现已跑完（378 tests，零真实 LLM）。
+  §19.5 真实生成运行（需 provider + plumbing）门控在 §十六 成本预检 + 显式批准之后；绝不
+  自动进入真实 LLM 运行、不合并 main、不提 PR。

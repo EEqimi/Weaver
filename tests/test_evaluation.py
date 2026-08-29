@@ -23,7 +23,9 @@ import json
 import pytest
 
 from knowledge.analysis.base import AnalysisUnavailable, LLMResponseError
-from knowledge.evaluation.analyze import _layer_d_diagnostic, measure_actual_profile
+from knowledge.evaluation.analyze import (
+    _layer_d_diagnostic, measure_actual_profile, stylometric_distance,
+)
 from knowledge.evaluation.compare import compare_target_actual
 from knowledge.evaluation.integrity import ContentIntegrityChecker
 from knowledge.evaluation.literary import LiteraryEvaluator
@@ -55,7 +57,8 @@ from knowledge.providers.llm_provider import DummyLLMProvider, UnconfiguredLLMPr
 from knowledge.schema.versions import (
     CONTENT_INTEGRITY_VERSION, EVALUATION_SCHEMA_VERSION,
     FEEDBACK_DECISION_SCHEMA_VERSION, LITERARY_EVALUATION_SCHEMA_VERSION,
-    REVISION_RESULT_SCHEMA_VERSION, STYLE_PLAN_SCHEMA_VERSION,
+    REVISION_RESULT_SCHEMA_VERSION, SEGMENT_DRIFT_VERSION,
+    STYLE_PLAN_SCHEMA_VERSION,
 )
 from knowledge.stylometry.extract import StylometricVectorizer
 
@@ -867,3 +870,54 @@ def test_layer_d_diagnostic_fails_closed_on_mismatch(tmp_path):
         json.dumps({"feature_names": ["bogus:1", "bogus:2"], "train_work_ids": ["emma"]}))
     with pytest.raises(EvalError):
         _layer_d_diagnostic(TEXT, "austen", base)
+
+
+# --------------------------------------------------------------------------- #
+# 段级 stylometric 漂移定位（spec §15.4）
+# --------------------------------------------------------------------------- #
+def test_layer_d_diagnostic_segment_drift_present_and_sorted(tmp_path):
+    base = _build_stylo_fixture(tmp_path)
+    d = _layer_d_diagnostic(TEXT, "austen", base)
+
+    drift = d["segment_drift"]
+    assert drift["version"] == SEGMENT_DRIFT_VERSION
+    assert drift["n_segments"] == 3          # TEXT 三句
+    assert drift["n_skipped"] == 0
+    assert drift["whole_passage_distance"] == d["cosine_distance"]
+    segs = drift["segments"]
+    assert len(segs) == 3
+    # 每句含定位字段：字符跨度 + 段落 + token 数 + 距离
+    for s in segs:
+        assert set(("segment_index", "char_start", "char_end", "paragraph_index",
+                    "n_tokens", "cosine_distance", "text_preview")) <= set(s)
+        assert s["char_start"] < s["char_end"]
+        assert s["paragraph_index"] == 0     # TEXT 单段
+        assert isinstance(s["cosine_distance"], float)
+    # 按 cosine_distance 降序
+    dists = [s["cosine_distance"] for s in segs]
+    assert dists == sorted(dists, reverse=True)
+    # 段序号完整覆盖 0..2，且跨度单调不重叠地覆盖原文
+    idxs = sorted(s["segment_index"] for s in segs)
+    assert idxs == [0, 1, 2]
+
+
+def test_segment_drift_skips_too_short_sentences(tmp_path):
+    base = _build_stylo_fixture(tmp_path)
+    # 第二句只有 1 个词（"Go."），应被标 skipped，不参与排序。
+    text = "She walked alone at dusk. Go. She remembered him clearly."
+    d = _layer_d_diagnostic(text, "austen", base)
+
+    drift = d["segment_drift"]
+    assert drift["n_segments"] == 3
+    assert drift["n_skipped"] == 1
+    assert len(drift["segments"]) == 2
+    assert [s["reason"] for s in drift["skipped"]] == ["too_short"]
+    assert drift["skipped"][0]["n_tokens"] < drift["min_tokens"]
+    # 排序里的段不含被跳过的那句。
+    assert all(s["segment_index"] != 1 for s in drift["segments"])
+
+
+def test_stylometric_distance_matches_layer_d(tmp_path):
+    base = _build_stylo_fixture(tmp_path)
+    assert stylometric_distance(TEXT, "austen", base) == \
+        _layer_d_diagnostic(TEXT, "austen", base)["cosine_distance"]

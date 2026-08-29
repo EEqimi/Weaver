@@ -297,3 +297,13 @@ def make_style_plan_id(author_id: str, source_profile_hash: str,
                        request: WritingRequest, policy: PlannerPolicy) -> str:
     """确定性 style_plan_id：同一 (author, profile, request, policy) 恒得同一 id。"""
     return _sha16(author_id, source_profile_hash, request.to_dict(), policy.to_dict())
+
+
+def make_intensity_plan_id(base_plan_id: str, intensity: str) -> str:
+    """强度覆写后的确定性 plan id（§19.5 可控性实验）。
+
+    基础 plan（(author, profile, request, policy) 派生）经 apply_intensity 覆写激活
+    级别后，其控制已变，须获得**互异**的确定性 id，否则同 id 异 prompt、身份混乱。
+    派生自 base_plan_id + intensity，绝不依赖时间。
+    """
+    return _sha16(base_plan_id, intensity)

@@ -82,3 +82,12 @@ FEEDBACK_DECISION_SCHEMA_VERSION = "0.2.0"
 # FeedbackDecision 均不变），故绝不 bump 上述版本以免错误失效缓存；独立版本仅记录
 # 循环实现版本，写入 summary 与 {author}_iterations.json 作溯源。
 FEEDBACK_LOOP_VERSION = "0.1.0"
+
+# Phase 9.2：段级 stylometric 漂移定位（spec §15.4）。只新增 Layer D 诊断产物的
+# segment_drift 字段（逐句余弦距离漂移图，诊断-only），不改任何 dataclass schema，
+# 绝不 bump STYLOMETRY_VERSION / EVALUATION_SCHEMA_VERSION；独立版本仅作溯源。
+SEGMENT_DRIFT_VERSION = "0.1.0"
+
+# Phase 9.3：§19.5 生成可控性实验（low/medium/high 强度重生成 + 单调性判定）。
+# 只新增实验编排模块，不改生成/画像/计划缓存；独立版本作产物溯源。
+CONTROLLABILITY_VERSION = "0.1.0"
